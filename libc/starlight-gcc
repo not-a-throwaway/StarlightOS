@@ -1,0 +1,35 @@
+#!/bin/sh
+# starlight-gcc: compile/link C programs for StarlightOS against newlib.
+#
+#   starlight-gcc -O2 hello.c -o HELLO.ELF
+#
+# Put the resulting .ELF on the disk (see `make disk-add`, or add it to make_disk.py) and run
+# it from the StarlightOS shell:   HELLO.ELF arg1 arg2    (or:  run HELLO.ELF arg1 arg2)
+set -eu
+SYSROOT=${STARLIGHT_SYSROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+LIBDIR=$SYSROOT/lib/starlight
+[ -f "$LIBDIR/crt0.o" ] || LIBDIR=$(cd "$(dirname "$0")" && pwd)/build   # running from the source tree
+LD_SCRIPT=$LIBDIR/starlight.ld
+[ -f "$LD_SCRIPT" ] || LD_SCRIPT=$(cd "$(dirname "$0")" && pwd)/starlight.ld
+CC=${STARLIGHT_CC:-x86_64-elf-gcc}
+NEWLIB=$SYSROOT/x86_64-elf
+
+# libslweb (the userland browser library) is linked in when it has been installed.
+# Programs that don't use it are unaffected: -lslweb only pulls in what's referenced.
+SLWEB_LIB=""
+[ -f "$LIBDIR/libslweb.a" ] && SLWEB_LIB="-lslweb"
+
+link=1
+for a in "$@"; do case "$a" in -c|-S|-E) link=0;; esac; done
+
+if [ $link = 0 ]; then
+    exec $CC -m64 -ffreestanding -fno-pie -fno-stack-protector -mno-red-zone \
+        -fno-asynchronous-unwind-tables -fno-unwind-tables \
+        -isystem "$NEWLIB/include" "$@"
+fi
+exec $CC -m64 -static -no-pie -nostdlib -nostartfiles -ffreestanding -fno-stack-protector -mno-red-zone \
+    -fno-asynchronous-unwind-tables -fno-unwind-tables \
+    -isystem "$NEWLIB/include" -L"$NEWLIB/lib" \
+    -T "$LD_SCRIPT" -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
+    "$LIBDIR/crt0.o" "$@" \
+    -Wl,--start-group -lc -lm -L"$LIBDIR" -lstarlight $SLWEB_LIB -lgcc -Wl,--end-group

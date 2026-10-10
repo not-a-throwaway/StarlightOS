@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StarlightOS Chat &gt;_&lt;</title>
+<style>
+:root{--bg:#0b1020;--panel:#121a30;--panel2:#18223d;--line:#24304f;--text:#e8ecf8;--mute:#8a96b8;--acc:#3584e4;--acc2:#7c5cff;--ok:#3ddc97;--bad:#ff5d73}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:radial-gradient(1200px 600px at 80% -10%,#1d2a55 0,transparent 60%),radial-gradient(900px 500px at -10% 110%,#2a1d55 0,transparent 55%),var(--bg);
+  color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:16px}
+.app{width:min(760px,100%);height:min(840px,100%);display:flex;flex-direction:column;background:linear-gradient(180deg,var(--panel),#0f1730);
+  border:1px solid var(--line);border-radius:18px;box-shadow:0 30px 80px #000a,0 0 0 1px #ffffff08 inset;overflow:hidden}
+header{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);background:#ffffff05}
+.logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;font-weight:800;box-shadow:0 6px 18px #3584e455}
+h1{font-size:16px;margin:0;letter-spacing:.2px}h1 small{display:block;font-weight:500;color:var(--mute);font-size:12px;margin-top:1px}
+.sp{flex:1}.pill{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);font-size:12.5px;color:var(--mute)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 0 #ff5d7360}.on .dot{background:var(--ok);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #3ddc9760}70%{box-shadow:0 0 0 7px #3ddc9700}100%{box-shadow:0 0 0 0 #3ddc9700}}
+#log{flex:1;overflow-y:auto;padding:18px 18px 8px;display:flex;flex-direction:column;gap:6px;scroll-behavior:smooth}
+#log::-webkit-scrollbar{width:8px}#log::-webkit-scrollbar-thumb{background:#2a3860;border-radius:8px}
+.row{display:flex;gap:10px;align-items:flex-end;max-width:86%;animation:in .18s ease-out}.row.me{align-self:flex-end;flex-direction:row-reverse}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.av{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;flex:none;text-shadow:0 1px 2px #0006}
+.grp{margin-top:8px}.cont .av{visibility:hidden}
+.bub{padding:8px 13px;border-radius:16px;background:var(--panel2);border:1px solid var(--line);word-break:break-word;white-space:pre-wrap}
+.row:not(.me) .bub{border-bottom-left-radius:5px}.me .bub{background:linear-gradient(135deg,var(--acc),#4a6cf0);border-color:transparent;border-bottom-right-radius:5px}
+.meta{font-size:11.5px;color:var(--mute);margin:0 4px 3px}.me .meta{text-align:right}.meta b{color:var(--text);font-weight:600}
+.sys{align-self:center;color:var(--mute);font-size:12.5px;background:#ffffff08;padding:3px 12px;border-radius:99px;margin:6px 0}
+.sep{align-self:center;color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:1.5px;margin:10px 0 4px}
+#jump{position:absolute;display:none;align-self:center;bottom:92px;background:var(--acc);color:#fff;border:0;border-radius:99px;padding:6px 14px;font-size:13px;cursor:pointer;box-shadow:0 8px 24px #0008}
+footer{padding:12px 14px 14px;border-top:1px solid var(--line);background:#ffffff04;display:flex;gap:10px;position:relative}
+input{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:11px 14px;outline:none;transition:border .15s,box-shadow .15s}
+input:focus{border-color:var(--acc);box-shadow:0 0 0 3px #3584e433}
+#msg{flex:1}#nick{width:140px}
+button.send{border:0;border-radius:12px;padding:0 20px;font:inherit;font-weight:600;color:#fff;cursor:pointer;background:linear-gradient(135deg,var(--acc),var(--acc2));transition:transform .1s,filter .15s}
+button.send:hover{filter:brightness(1.1)}button.send:active{transform:scale(.96)}button.send:disabled{filter:grayscale(1) brightness(.6);cursor:default}
+.cnt{position:absolute;right:112px;top:22px;font-size:11px;color:var(--mute);pointer-events:none}
+@media(max-width:560px){#nick{width:96px}.row{max-width:94%}}
+</style></head>
+<body>
+<div class="app" id="app">
+  <header>
+    <div class="logo">&#9733;</div>
+    <h1>StarlightOS Chat &gt;_&lt;<small>served live by the kernel's poll() loop</small></h1>
+    <div class="sp"></div>
+    <div class="pill" id="online">&#128101; <span id="count">0</span> online</div>
+    <div class="pill" id="state"><span class="dot"></span><span id="stxt">connecting</span></div>
+  </header>
+  <div id="log"></div>
+  <footer>
+    <input id="nick" maxlength="20" placeholder="your name" autocomplete="off" spellcheck="false">
+    <input id="msg" maxlength="240" placeholder="Say something nice..." autocomplete="off" autofocus>
+    <span class="cnt" id="cnt"></span>
+    <button class="send" id="go">Send</button>
+    <button id="jump" onclick="toEnd(true)">&#8595; new messages</button>
+  </footer>
+</div>
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)},log=$('log'),nick=$('nick'),msg=$('msg'),go=$('go');
+var me='',es=null,last=null,lastMin='',pinned=true,hadHistory=false,seen={};
+function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+var animals=['Comet','Nova','Quasar','Pulsar','Nebula','Orbit','Photon','Aurora','Meteor','Cosmo'];
+nick.value=store('sl_nick')||animals[Math.random()*animals.length|0]+(10+Math.random()*89|0);me=nick.value;
+function hue(s){var h=0;for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return h%360}
+function color(n){var h=hue(n);return'linear-gradient(135deg,hsl('+h+',70%,52%),hsl('+(h+40)%360+',75%,42%))'}
+function atEnd(){return log.scrollHeight-log.scrollTop-log.clientHeight<60}
+function toEnd(force){if(force||pinned){log.scrollTop=log.scrollHeight}$('jump').style.display='none'}window.toEnd=toEnd;
+log.addEventListener('scroll',function(){pinned=atEnd();if(pinned)$('jump').style.display='none'});
+function pad(n){return n<10?'0'+n:n}
+function add(m){
+  if(m.id&&seen[m.id])return;if(m.id)seen[m.id]=1;
+  var stick=atEnd();
+  if(m.k==='s'){var d=document.createElement('div');d.className='sys';d.textContent=m.t;log.appendChild(d);last=null}
+  else{
+    var mine=m.n===me,cont=last&&last.n===m.n&&last.t&&Date.now()-last.t<120000;
+    var row=document.createElement('div');row.className='row'+(mine?' me':'')+(cont?' cont':' grp');
+    var av=document.createElement('div');av.className='av';av.style.background=color(m.n);av.textContent=m.n.slice(0,2).toUpperCase();
+    var col=document.createElement('div');
+    if(!cont){var meta=document.createElement('div');meta.className='meta';var now=new Date();
+      meta.innerHTML='<b></b> ';meta.firstChild.textContent=m.n;
+      if(!m.h)meta.appendChild(document.createTextNode(pad(now.getHours())+':'+pad(now.getMinutes())));col.appendChild(meta)}
+    var b=document.createElement('div');b.className='bub';b.textContent=m.t;col.appendChild(b);
+    row.appendChild(av);row.appendChild(col);log.appendChild(row);last={n:m.n,t:Date.now()};
+  }
+  if(stick||m.n===me)toEnd(true);else $('jump').style.display='block';
+  while(log.children.length>400)log.removeChild(log.firstChild);
+}
+function status(on,t){$('state').className='pill'+(on?' on':'');$('stxt').textContent=t}
+function connect(){
+  if(es)es.close();status(false,'connecting');
+  es=new EventSource('/api/stream?n='+encodeURIComponent(me));
+  es.onopen=function(){status(true,'live')};
+  es.onerror=function(){status(false,'reconnecting...')};
+  es.onmessage=function(e){try{add(Object.assign({id:+e.lastEventId},JSON.parse(e.data)))}catch(x){}};
+  es.addEventListener('presence',function(e){$('count').textContent=e.data});
+}
+function send(){
+  var t=msg.value.trim();if(!t)return;go.disabled=true;
+  fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'n='+encodeURIComponent(me)+'&m='+encodeURIComponent(t)})
+   .then(function(r){if(r.ok||r.status===204){msg.value='';upd()}}).catch(function(){status(false,'send failed')})
+   .then(function(){go.disabled=false;msg.focus()});
+}
+function upd(){var n=msg.value.length;$('cnt').textContent=n>180?n+'/240':''}
+function rename(){var v=nick.value.replace(/[^\w .-]/g,'').trim().slice(0,20);if(!v){nick.value=me;return}
+  if(v!==me){me=v;store('sl_nick',me);connect()}}
+go.onclick=send;msg.oninput=upd;
+msg.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};
+nick.onchange=rename;nick.onkeydown=function(e){if(e.key==='Enter'){rename();msg.focus()}};
+store('sl_nick',me);connect();
+})();
+</script></body></html>

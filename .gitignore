@@ -1,0 +1,26 @@
+# Build outputs
+*.o
+*.d
+*.a
+*.ELF
+*.bin
+*.elf
+*.img
+*.iso
+
+# Generated / installed trees
+/sysroot/
+/isodir/
+/libc/build/
+/libc/build-newlib/
+/libslweb/build/
+
+# Third-party source fetched by libc/build-newlib.sh (see libc/README.md)
+/newlib-cygwin/
+
+# Python test caches
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
