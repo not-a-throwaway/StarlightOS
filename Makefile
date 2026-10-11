@@ -27,7 +27,7 @@ SRCS = kernel.c idt.c pic.c pit.c rtc.c speaker.c keyboard.c mouse.c \
        font8x8.c font.c font_ttf.c pci.c rtl8139.c vbe.c vga.c gui.c starlightos_gui.c \
        disk.c vfs.c ext2.c devfs.c procfs.c \
        kstring.c kprintf.c serial.c ktime.c ksched.c kheap.c \
-       net.c tcp.c poll.c httpd.c dns.c url.c http.c html.c crypto.c chachapoly.c p256.c krand.c tls.c bignum.c rsa.c ecdsa.c telnet.c \
+       net.c tcp.c poll.c httpd.c dns.c url.c http.c html.c crypto.c chachapoly.c p256.c krand.c tls.c bignum.c rsa.c ecdsa.c x509.c telnet.c \
        ac97.c audio.c \
        shell.c cmd_text.c cmd_net.c cmd_sound.c cmd_unix.c cmd_posix.c
 
@@ -134,6 +134,8 @@ run-chat: starlightos64.elf starlightos64.bin bootsector.bin stage2.bin disk.img
 hosttest:
 	gcc -O1 -Wall -Wextra -Itests/host -I. -o /tmp/starlightos_crypto_cli tests/host/crypto_cli.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c
 	python3 tests/host/crypto_diff.py /tmp/starlightos_crypto_cli
+	gcc -O1 -Wall -Wextra -Itests/host -I. -o /tmp/starlightos_x509_cli tests/host/x509_cli.c x509.c crypto.c bignum.c rsa.c ecdsa.c
+	python3 tests/host/x509_diff.py /tmp/starlightos_x509_cli
 	gcc -O1 -Wall -Wextra -I. -o /tmp/starlightos_telnet_cli tests/host/telnet_cli.c telnet.c
 	python3 tests/host/telnet_test.py /tmp/starlightos_telnet_cli
 	gcc -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I. -o /tmp/starlightos_html_cli tests/host/html_cli.c html.c
