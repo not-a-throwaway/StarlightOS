@@ -94,4 +94,11 @@ static inline long starlightos_resolve(const char *host, uint8_t out_ip[4])
     __asm__ volatile("int $0x80" : "=a"(result) : "0"(SL_SYS_RESOLVE), "D"((uint64_t)(uintptr_t)host), "S"((uint64_t)(uintptr_t)out_ip) : "rcx", "r11", "memory");
     return result;
 }
+
+static inline long starlightos_random(void *buf, size_t len)
+{
+    long result;
+    __asm__ volatile("int $0x80" : "=a"(result) : "0"(SL_SYS_RANDOM), "D"((uint64_t)(uintptr_t)buf), "S"((uint64_t)len) : "rcx", "r11", "memory");
+    return result;
+}
 #endif

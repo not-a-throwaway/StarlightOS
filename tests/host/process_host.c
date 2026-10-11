@@ -105,6 +105,7 @@ int dns_resolve(const char *name, uint8_t ip[4])
     if (!strcmp(name, "10.0.2.2"))  { ip[0] = 10; ip[1] = 0; ip[2] = 2; ip[3] = 2; return 0; }
     return -1;
 }
+void krand_bytes(void *b, size_t n) { unsigned char *p = b; for (size_t i = 0; i < n; i++) p[i] = (unsigned char)(0xA5u ^ (unsigned)i); }
 
 #include "process.c"      /* the code under test */
 
@@ -409,6 +410,12 @@ int main(void)
     setstr(0, "host.test"); CHECK(sc(125, W(0), W(3072), 0) == 0 && rip[0] == 1 && rip[1] == 2 && rip[2] == 3 && rip[3] == 4);
     setstr(0, "10.0.2.2");  CHECK(sc(125, W(0), W(3072), 0) == 0 && rip[0] == 10 && rip[3] == 2);
     setstr(0, "nope.test"); CHECK(sc(125, W(0), W(3072), 0) == -E_NOENT);
+
+    /* random(): fills a user buffer through the kernel CSPRNG, bounds-checked */
+    memset(P(3072), 0, 8);
+    CHECK(sc(126, W(3072), 8, 0) == 0 && memcmp(P(3072), "\0\0\0\0\0\0\0\0", 8) != 0);
+    CHECK(sc(126, W(3072), 4097, 0) == -E_INVAL);
+    CHECK(sc(126, 0x1000, 8, 0) == -E_FAULT);
 
     /* close() releases the kfd and the fd slot */
     int sk = fds[sfd].u.sock.kfd;

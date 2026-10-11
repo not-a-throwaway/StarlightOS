@@ -32,6 +32,7 @@
 #define SL_SYS_RECV     123   /* long recv(int fd, void *buf, size_t len) -> bytes / 0 EOF (or -errno) */
 #define SL_SYS_POLL     124   /* int poll(struct sl_pollfd *fds, int nfds, int timeout_ms) */
 #define SL_SYS_RESOLVE  125   /* int resolve(const char *host, uint8_t out_ip[4]) */
+#define SL_SYS_RANDOM   126   /* int random(void *buf, size_t len) -> 0; CSPRNG bytes (krand), for TLS keys */
 
 /* ---- address family / socket type (Linux values) ---- */
 #define SL_AF_INET       2
@@ -78,6 +79,7 @@ long sl_send(int fd, const void *buf, size_t len);             /* bytes, or -1 +
 long sl_recv(int fd, void *buf, size_t len);                   /* bytes / 0 EOF, or -1 + errno */
 int  sl_poll(struct sl_pollfd *fds, int nfds, int timeout_ms); /* ready count, 0 on timeout, -1 + errno */
 int  sl_resolve(const char *host, uint8_t out_ip[4]);          /* 0, or -1 + errno */
+int  sl_random(void *buf, size_t len);                         /* 0, or -1 + errno (CSPRNG bytes) */
 #ifdef __cplusplus
 }
 #endif

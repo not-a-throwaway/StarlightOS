@@ -2,13 +2,12 @@
  * libslweb -- HTTP/1.1 client (lifted from the kernel's http.c).
  *
  * Redirects, chunked transfer, Content-Length, read-until-close, HEAD/POST.
- * Instead of the kernel's TCP + TLS layers it drives the M2 ring-3 syscalls
- * (user/slnet.h): sl_resolve/sl_socket/sl_connect/sl_send/sl_recv/sl_poll.
- *
- * HTTPS is not available yet: the userland TLS client and certificate
- * validation are the M9 milestone. Until then an https:// URL returns
- * SLWEB_ERR_HTTPS, which the browser turns into an "unverified connection"
- * badge rather than fetching in the clear.
+ * Plain HTTP drives the M2 ring-3 syscalls (user/slnet.h):
+ * sl_resolve/sl_socket/sl_connect/sl_send/sl_recv/sl_poll. HTTPS runs the
+ * kernel's TLS client (tls.c, compiled in via tls_user.c) over the same socket;
+ * the server's certificate chain is validated against a trust store that starts
+ * empty (fail closed), so a caller must load roots with slweb_http_add_ca_pem()
+ * / slweb_http_add_ca_file() or opt out per request with opts.insecure.
  *
  * The structure mirrors the kernel file so the two stay easy to diff; the
  * error codes are the same values, exposed as SLWEB_ERR_*.
@@ -22,6 +21,7 @@
 #include <unistd.h>
 #include "slweb.h"
 #include "../user/slnet.h"
+#include "../tls.h"
 
 #define DEFAULT_MAX_BODY (2u * 1024u * 1024u)
 #define HEAD_MAX 6144
@@ -63,7 +63,7 @@ const char *slweb_http_error_text(int code)
     case SLWEB_ERR_INTR:      return "interrupted";
     case SLWEB_ERR_NONET:     return "network not configured (no DHCP lease yet)";
     case SLWEB_ERR_BADURL:    return "bad URL";
-    case SLWEB_ERR_HTTPS:     return "https:// needs the userland TLS client (M9)";
+    case SLWEB_ERR_HTTPS:     return "https is unavailable in this build";
     default:                  return "error";
     }
 }
@@ -73,6 +73,52 @@ void slweb_http_response_free(struct slweb_response *r)
     if (r->body) free(r->body);
     r->body = NULL; r->body_len = 0;
 }
+
+/* A human string for the underlying TLS failure (res->tls_error, a TLS_E_* code). */
+const char *slweb_http_tls_error_text(int tls_error)
+{
+    switch (tls_error) {
+    case 0:                 return "ok";
+    case TLS_E_CERT:        return "certificate did not verify";
+    case TLS_E_ALERT:       return "server sent a fatal alert";
+    case TLS_E_UNSUPPORTED: return "no supported TLS version or cipher";
+    case TLS_E_MAC:         return "handshake finished MAC did not verify";
+    case TLS_E_NOMEM:       return "out of memory during the handshake";
+    case TLS_E_ABORT:       return "handshake interrupted";
+    default:                return tls_error_text(tls_error);
+    }
+}
+
+/* ---- TLS trust store (shared global; roots persist across requests) ---- */
+int slweb_http_add_ca_pem(const char *pem, size_t len)
+{
+    return tls_ca_add_pem(pem, len);
+}
+
+int slweb_http_add_ca_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t cap = 65536, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { fclose(f); return -1; }
+    for (;;) {
+        if (len == cap) {
+            char *nb = (char *)realloc(buf, cap * 2);
+            if (!nb) { free(buf); fclose(f); return -1; }
+            buf = nb; cap *= 2;
+        }
+        size_t r = fread(buf + len, 1, cap - len, f);
+        len += r;
+        if (r == 0) break;
+    }
+    fclose(f);
+    int added = tls_ca_add_pem(buf, len);
+    free(buf);
+    return added;
+}
+
+void slweb_http_reset_ca(void) { tls_ca_reset(); }
 
 /* case-insensitive header lookup inside the raw header block */
 static int header_value(const char *headers, const char *name, char *out, size_t cap)
@@ -119,19 +165,22 @@ static int sink_add(struct body_sink *s, const uint8_t *d, size_t n)
 
 enum { CH_SIZE, CH_EXT, CH_SIZE_LF, CH_DATA, CH_CR, CH_LF, CH_TRAILER, CH_DONE };
 
-/* A plain TCP connection to the fixture/server. */
-struct stream { int sock; };
+/* A connection to the server, plain TCP or wrapped in TLS. */
+struct stream { int sock; struct tls_conn *tls; };
 
 static int st_send(struct stream *st, const void *d, size_t n)
 {
+    if (st->tls) return tls_send(st->tls, d, n);
     long r = sl_send(st->sock, d, n);
     return r < 0 ? -1 : (int)r;
 }
 
 /* Wait for readability with the caller's timeout (the socket syscall itself
- * blocks up to 30 s), then read. 0 bytes means EOF. -1 means timeout/error. */
+ * blocks up to 30 s), then read. 0 bytes means EOF. -1 means timeout/error.
+ * With TLS the handshake/records are driven by tls.c (tcp_recv convention). */
 static int st_recv(struct stream *st, void *b, size_t cap, uint32_t tmo)
 {
+    if (st->tls) return tls_recv(st->tls, b, cap, tmo);
     struct sl_pollfd p; p.fd = st->sock; p.events = SL_POLLIN; p.revents = 0;
     int pr = sl_poll(&p, 1, (int)tmo);
     if (pr == 0) { errno = EAGAIN; return -1; }
@@ -140,7 +189,7 @@ static int st_recv(struct stream *st, void *b, size_t cap, uint32_t tmo)
     return n < 0 ? -1 : (int)n;
 }
 
-static void st_close(struct stream *st) { close(st->sock); }
+static void st_close(struct stream *st) { if (st->tls) tls_close(st->tls); close(st->sock); }
 
 static uint16_t sw_htons(uint16_t v) { return (uint16_t)((v << 8) | (v >> 8)); }
 
@@ -159,14 +208,31 @@ static int sw_connect(const struct slweb_url *u, const uint8_t ip[4])
 
 static int single_request(const struct slweb_url *u, const struct slweb_http_opts *o, struct slweb_response *res)
 {
-    if (u->https) return SLWEB_ERR_HTTPS;               /* M9: userland TLS + cert validation */
-
     uint8_t ip[4];
     if (sl_resolve(u->host, ip) != 0) return errno == EINTR ? SLWEB_ERR_INTR : SLWEB_ERR_RESOLVE;
 
     int sock = sw_connect(u, ip);
     if (sock < 0) return errno == EINTR ? SLWEB_ERR_INTR : SLWEB_ERR_CONNECT;
-    struct stream st = { sock };
+    struct stream st = { sock, NULL };
+
+    if (u->https) {
+        int terr = 0;
+        tls_set_trace(o->verbose);
+        tls_set_verify(!o->insecure);
+        st.tls = tls_connect(sock, u->host, o->timeout_ms ? o->timeout_ms : 8000, &terr);
+        if (!st.tls) {
+            res->tls_error = terr;
+            res->tls_alert = tls_last_alert();
+            close(sock);
+            return terr == TLS_E_ABORT ? SLWEB_ERR_INTR : SLWEB_ERR_TLS;
+        }
+        res->tls_verified = tls_verify_result(st.tls) == 0;
+        sl_strlcpy(res->tls_peer, tls_peer_cn(st.tls), sizeof(res->tls_peer));
+        if (o->verbose)
+            printf("* %s (%s%s%s)\n", tls_describe(st.tls),
+                   res->tls_verified ? "certificate verified" : "certificate NOT verified",
+                   res->tls_peer[0] ? ": " : "", res->tls_peer);
+    }
 
     /* ---- request ---- */
     const char *method = o->method ? o->method : "GET";

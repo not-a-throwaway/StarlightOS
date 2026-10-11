@@ -20,8 +20,11 @@
  *   - M2 sockets via libslweb for the page and its images;
  *   - M5 DOM + layout, M6 CSS + images, M7 chrome + forms.
  *
- * https:// pages still fail with SLWEB_ERR_HTTPS and show the "unverified
- * connection" badge until M9.
+ * M9.4: https:// is real. The kernel's TLS client (lifted into libslweb) does a
+ * full handshake and validates the server certificate against a trust store that
+ * starts empty, so the browser takes --cafile FILE (load PEM roots) and
+ * --insecure / -k (skip validation, for tests). A verified page shows "[secure]";
+ * an opted-out or unverifiable one shows "[unverified connection]".
  *
  * Keys:  Ctrl-L address bar   Ctrl-D bookmark   Ctrl-B bookmarks bar
  *        1-9 follow a link (or a bookmark when the bar is focused)
@@ -70,6 +73,7 @@
 #define C_LINK_HI   0xFFFFFF
 #define C_SEL_BG    0x2A3A55
 #define C_WARN      0xFFC857
+#define C_OK        0x5FD37A
 #define C_RULE      0x39465C
 #define C_MARKER    0xA1B0C4
 #define C_IMG_BG    0x1A2130
@@ -106,6 +110,9 @@ static int hpos;                 /* index of the current entry, -1 = none */
 static int selected;             /* 1-based link index, 0 = none */
 static int scroll;
 static int is_https;
+static int tls_verified;         /* https result: 1 = chain validated */
+static char tls_peer[128];       /* https peer CN ("" if none) */
+static int opt_insecure;         /* --insecure: do not validate certs */
 static char status_line[256];
 
 static struct slweb_cache *cache;
@@ -581,6 +588,8 @@ static void navigate(const char *target, const char *method, const char *body,
 
     struct slweb_url parsed;
     is_https = 0;
+    tls_verified = 0;
+    tls_peer[0] = 0;
     if (slweb_url_parse(url, &parsed) == 0) is_https = parsed.https;
 
     struct slweb_response r;
@@ -613,24 +622,33 @@ static void navigate(const char *target, const char *method, const char *body,
         o.method = method;
         o.body = body;
         o.body_len = blen;
+        o.insecure = opt_insecure;
 
         int err = slweb_http_request(url, &o, &r);
-        if (err == 0 && r.final_url[0]) snprintf(url, sizeof url, "%s", r.final_url);
+        if (err == 0 && r.final_url[0]) {
+            snprintf(url, sizeof url, "%s", r.final_url);
+            struct slweb_url fin;
+            if (slweb_url_parse(url, &fin) == 0) is_https = fin.https;
+        }
 
         if (err != 0) {
-            if (is_https || (r.final_url[0] && strstr(r.final_url, "https://")))
-                printf("BROWSER: https unverified\n");
-            char page[640];
+            if (is_https && r.tls_error)
+                printf("BROWSER: tls error=%d (%s)\n", r.tls_error,
+                       slweb_http_tls_error_text(r.tls_error));
+            char detail[160];
+            if (is_https && r.tls_error)
+                snprintf(detail, sizeof detail, "%s", slweb_http_tls_error_text(r.tls_error));
+            else
+                snprintf(detail, sizeof detail, "%s (error %d)", slweb_http_error_text(err), err);
+            char page[768];
             snprintf(page, sizeof page,
-                     "<h2>Could not load page</h2><p>%s</p><p>%s (error %d)</p>",
-                     url, slweb_http_error_text(err), err);
+                     "<h2>Could not load page</h2><p>%s</p><p>%s</p>", url, detail);
             free_page();
             dom = slweb_dom_parse(page, strlen(page));
             if (!dom) dom = slweb_dom_from_text(page, strlen(page));
             css = slweb_css_parse(dom);
-            snprintf(status_line, sizeof status_line, "error: %s (%d)",
-                     slweb_http_error_text(err), err);
-            printf("BROWSER: error err=%d (%s)\n", err, slweb_http_error_text(err));
+            snprintf(status_line, sizeof status_line, "error: %s", detail);
+            printf("BROWSER: error err=%d (%s)\n", err, detail);
             layout_and_log();
             collect_fields();
             slweb_http_response_free(&r);
@@ -639,6 +657,11 @@ static void navigate(const char *target, const char *method, const char *body,
             draw();
             return;
         }
+
+        tls_verified = r.tls_verified;
+        snprintf(tls_peer, sizeof tls_peer, "%s", r.tls_peer);
+        if (is_https)
+            printf("BROWSER: tls verified=%d peer=%s\n", tls_verified, tls_peer[0] ? tls_peer : "-");
 
         printf("BROWSER: fetch status=%d type=%s len=%zu\n",
                r.status, r.content_type, r.body_len);
@@ -967,8 +990,9 @@ static void draw(void)
               "1-9 follow  tab next  enter go  b/f back/fwd  r reload  ctrl-l url  ctrl-d mark  q quit",
               C_BAR_FG);
     if (is_https) {
-        const char *badge = "[unverified connection]";
-        draw_text(W - MARGIN - text_w(badge), H - BOT_H + 4, badge, C_WARN);
+        const char *badge = tls_verified ? "[secure]" : "[unverified connection]";
+        draw_text(W - MARGIN - text_w(badge), H - BOT_H + 4, badge,
+                  tls_verified ? C_OK : C_WARN);
     }
 
     if (doc_h > H - TOP_H - BOT_H) {
@@ -1291,8 +1315,8 @@ static void handle_key(unsigned c)
 static void usage(void)
 {
     static const char page[] =
-        "<h2>BROWSER (M8)</h2>"
-        "<p>Usage: BROWSER.ELF &lt;url&gt;</p>"
+        "<h2>BROWSER (M9)</h2>"
+        "<p>Usage: BROWSER.ELF [--insecure] [--cafile FILE] &lt;url&gt;</p>"
         "<p>The page is parsed into a DOM, styled with its CSS subset, laid out "
         "into boxes and drawn with a built-in 8x8 font; PNG and base64 "
         "images are decoded and painted.</p>"
@@ -1300,8 +1324,11 @@ static void usage(void)
         "HTTP cache, bookmarks (Ctrl-D, then Ctrl-B + 1-9) and HTML forms "
         "(Tab to move, type to edit, Enter to submit). M8 adds TCP window "
         "scaling (RFC 7323) with a 128 KiB receive window for faster large "
-        "transfers. TLS certificate validation (M9) is still to come, so "
-        "https:// pages show an unverified-connection badge.</p>";
+        "transfers.</p>"
+        "<p>M9.4 adds real https://: the server certificate is validated against "
+        "roots loaded with --cafile (the store starts empty and fails closed), "
+        "and --insecure / -k skips validation. A validated page shows [secure]; "
+        "otherwise [unverified connection].</p>";
     free_page();
     nboxes = nlinks = 0;
     doc_h = 0;
@@ -1316,7 +1343,24 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    const char *start_url = NULL;
+
     printf("BROWSER: start\n");
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--insecure") || !strcmp(argv[i], "-k")) {
+            opt_insecure = 1;
+        } else if (!strcmp(argv[i], "--cafile") && i + 1 < argc) {
+            int roots = slweb_http_add_ca_file(argv[++i]);
+            printf("BROWSER: cafile %s roots=%d\n", argv[i], roots);
+        } else if (argv[i][0]) {
+            start_url = argv[i];
+        }
+    }
+    /* M9.5 will ship a bundle here; a harmless no-op until then (the store
+     * still starts empty and https fails closed). */
+    if (!opt_insecure) slweb_http_add_ca_file("/etc/ssl/certs/ca-certificates.crt");
+    if (opt_insecure) printf("BROWSER: insecure certificate validation off\n");
 
     fb = (uint32_t *)sl_fbmap(W, H);
     if (!fb) { printf("BROWSER: fbmap FAIL errno=%d\n", errno); return 1; }
@@ -1327,7 +1371,7 @@ int main(int argc, char **argv)
     hpos = -1;
     bookmarks_load();
 
-    if (argc >= 2 && argv[1][0]) navigate(argv[1], NULL, NULL, 0, 0, 1);
+    if (start_url && start_url[0]) navigate(start_url, NULL, NULL, 0, 0, 1);
     else usage();
 
     while (!done) {

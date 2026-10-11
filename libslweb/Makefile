@@ -50,7 +50,38 @@ build/cache.o: cache.c slweb.h | build
 build/form.o: form.c slweb.h | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/libslweb.a: build/url.o build/http.o build/html.o build/dom.o build/layout.o build/css.o build/image.o build/png.o build/cache.o build/form.o
+# M9.4: HTTPS runs the kernel's TLS client. tls.c/crypto.c/x509.c are shared
+# verbatim with the kernel; tls_user.c provides the ring-3 platform layer
+# (sl_* sockets, newlib malloc/time, the kernel CSPRNG via SL_SYS_RANDOM).
+build/tls.o: ../tls.c ../tls.h ../crypto.h ../x509.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/crypto.o: ../crypto.c ../crypto.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/chachapoly.o: ../chachapoly.c ../crypto.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/p256.o: ../p256.c ../crypto.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/bignum.o: ../bignum.c ../bignum.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/rsa.o: ../rsa.c ../rsa.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/ecdsa.o: ../ecdsa.c ../ecdsa.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/x509.o: ../x509.c ../x509.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/tls_user.o: tls_user.c ../user/slnet.h ../net.h | build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/libslweb.a: build/url.o build/http.o build/html.o build/dom.o build/layout.o build/css.o build/image.o build/png.o build/cache.o build/form.o \
+                  build/tls.o build/tls_user.o build/crypto.o build/chachapoly.o build/p256.o build/bignum.o build/rsa.o build/ecdsa.o build/x509.o
 	$(AR) rcs $@ $^
 
 install: all

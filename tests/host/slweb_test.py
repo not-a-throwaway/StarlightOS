@@ -84,8 +84,8 @@ http('content-length body', 'http://10.0.2.2:18001/x', OK,
 http('request line + Host header', 'http://10.0.2.2:18001/x', OK,
      contains={'request': 'GET /x HTTP/1.1\\r\\nHost: 10.0.2.2:18001\\r\\n'})
 
-http('https rejected with a clear code', 'https://example.com/', b'',
-     error=-12, error_text='https:// needs the userland TLS client (M9)')
+http('https handshake failure reports a TLS error', 'https://example.com/', b'\x16\x03\x03\x00\x02\x00\x00',
+     error=-7, error_text='TLS handshake failed')
 
 http('no response times out', 'http://10.0.2.2:18001/x', b'',
      error=-4, error_text='no response (timed out)')

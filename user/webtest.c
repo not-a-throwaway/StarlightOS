@@ -63,9 +63,11 @@ int main(void)
     printf("WEBTEST: html err=%d len=%zu |%s|\n", err, tn, text);
     slweb_http_response_free(&r);
 
-    /* https:// is deferred to M9: report it so the browser can show the badge. */
-    err = slweb_http_request("https://example.com/", &o, &r);
+    /* https:// is real as of M9.4: the handshake runs, and with no trust anchor
+     * loaded the server certificate fails to verify. */
+    err = slweb_http_request("https://10.0.2.2:18443/", &o, &r);
     printf("WEBTEST: https err=%d (%s)\n", err, slweb_http_error_text(err));
+    printf("WEBTEST: https tls_error=%d verified=%d\n", r.tls_error, r.tls_verified);
     slweb_http_response_free(&r);
 
     /* Connection refused and a malformed URL. */

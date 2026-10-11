@@ -26,7 +26,8 @@ enum {
     SYS_gettimeofday = 96, SYS_uptime_us = 100, SYS_open = 101,
     SYS_fbmap = SL_SYS_FBMAP, SYS_present = SL_SYS_PRESENT, SYS_getevents = SL_SYS_GETEVENTS,
     SYS_socket = SL_SYS_SOCKET, SYS_connect = SL_SYS_CONNECT, SYS_send = SL_SYS_SEND,
-    SYS_recv = SL_SYS_RECV, SYS_poll = SL_SYS_POLL, SYS_resolve = SL_SYS_RESOLVE
+    SYS_recv = SL_SYS_RECV, SYS_poll = SL_SYS_POLL, SYS_resolve = SL_SYS_RESOLVE,
+    SYS_random = SL_SYS_RANDOM
 };
 
 /* kernel-side open flags (Linux values; translated from newlib's <fcntl.h> below) */
@@ -255,4 +256,9 @@ int sl_poll(struct sl_pollfd *fds, int nfds, int timeout_ms)
 int sl_resolve(const char *host, uint8_t out_ip[4])
 {
     return (int)fix(sc(SYS_resolve, (long)(uintptr_t)host, (long)(uintptr_t)out_ip, 0));
+}
+
+int sl_random(void *buf, size_t len)
+{
+    return (int)fix(sc(SYS_random, (long)(uintptr_t)buf, (long)len, 0));
 }

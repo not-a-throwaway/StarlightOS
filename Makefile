@@ -228,7 +228,7 @@ apps/WEBTEST.ELF: user/webtest.c libslweb/slweb.h libslweb/url.c libslweb/http.c
 	$(STARLIGHT_GCC) -O2 -Wall user/webtest.c -o $@
 
 # BROWSER: the M6 browser -- libslweb (DOM + box layout + CSS + images) drawn into an M1 window.
-apps/BROWSER.ELF: user/browser.c user/slwindow.h font8x8_basic.h libslweb/slweb.h libslweb/url.c libslweb/http.c libslweb/html.c libslweb/dom.c libslweb/layout.c libslweb/css.c libslweb/image.c libslweb/png.c libslweb/cache.c libslweb/form.c libc/syscalls.c libc/crt0.S libc/starlight.ld
+apps/BROWSER.ELF: user/browser.c user/slwindow.h font8x8_basic.h libslweb/slweb.h libslweb/url.c libslweb/http.c libslweb/html.c libslweb/dom.c libslweb/layout.c libslweb/css.c libslweb/image.c libslweb/png.c libslweb/cache.c libslweb/form.c libslweb/tls_user.c tls.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c x509.c libc/syscalls.c libc/crt0.S libc/starlight.ld
 	@test -x $(STARLIGHT_GCC) || { echo "newlib is not built yet: run 'NEWLIB_SRC=... make newlib' (see libc/README.md)"; exit 1; }
 	$(MAKE) -C libc all install SYSROOT=$(SYSROOT)
 	$(MAKE) -C libslweb all install SYSROOT=$(SYSROOT)
@@ -248,12 +248,21 @@ proctest:
 # + png.c) against a scripted, in-memory socket layer: URL parsing, HTTP status/headers,
 # Content-Length, chunked, redirects, errors, the DOM tree and exact box geometry, the CSS cascade,
 # and PNG/BS64/data: image decoding. The kernel HTML corpus (html_test.py) is reused verbatim.
-slwebtest:
-	gcc -g -O1 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -I. -Ilibslweb -o /tmp/slweb_host tests/host/slweb_host.c libslweb/url.c libslweb/html.c libslweb/http.c libslweb/dom.c libslweb/layout.c libslweb/css.c libslweb/image.c libslweb/png.c libslweb/cache.c libslweb/form.c
+slwebtest: slwebtlstest
+	gcc -g -O1 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -I. -Ilibslweb -o /tmp/slweb_host tests/host/slweb_host.c libslweb/url.c libslweb/html.c libslweb/http.c libslweb/dom.c libslweb/layout.c libslweb/css.c libslweb/image.c libslweb/png.c libslweb/cache.c libslweb/form.c libslweb/tls_user.c tls.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c x509.c
 	python3 tests/host/slweb_test.py /tmp/slweb_host
 	python3 tests/host/html_test.py /tmp/slweb_host
 
-.PHONY: proctest slwebtest tcptest
+# Host test of libslweb's HTTPS path over real loopback sockets: the same
+# http.c is driven against OpenSSL s_server with an ephemeral CA, checking a
+# verified fetch, a certificate that fails to verify, a hostname mismatch and
+# --insecure. tls_user.c's tcp_*/krand shims run over real sl_* sockets provided
+# by the driver.
+slwebtlstest:
+	gcc -g -O1 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -I. -Ilibslweb -o /tmp/slweb_tls_host tests/host/slweb_tls_host.c libslweb/url.c libslweb/http.c libslweb/tls_user.c tls.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c x509.c
+	python3 tests/host/slweb_tls_test.py /tmp/slweb_tls_host
+
+.PHONY: proctest slwebtest slwebtlstest tcptest
 
 # Host test of the kernel TCP (tcp.c) against a mock IP layer: the RFC 7323
 # window-scale handshake in both roles, the >64 KiB windows it unlocks, the

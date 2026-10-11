@@ -117,6 +117,15 @@ int sl_resolve(const char *host, uint8_t out_ip[4])
     return 0;
 }
 
+/* Deterministic bytes; the scripted sockets never complete a TLS handshake, so
+ * this only has to be non-zero and stable (no /dev/urandom dependency). */
+int sl_random(void *buf, size_t len)
+{
+    unsigned char *p = (unsigned char *)buf;
+    for (size_t i = 0; i < len; i++) p[i] = (unsigned char)(0x5Au ^ (unsigned)(i * 31 + 7));
+    return 0;
+}
+
 /* ------------------------------------------------------------------ helpers */
 static void print_escaped(const char *tag, const void *p, size_t n)
 {
@@ -536,6 +545,10 @@ static void http_mode(const char *url, int hops, const char *method, const char 
     printf("content_length=%d\n", r.content_length);
     printf("redirects=%d\n", r.redirects);
     printf("truncated=%d\n", r.truncated);
+    printf("tls_verified=%d\n", r.tls_verified);
+    printf("tls_peer=%s\n", r.tls_peer);
+    printf("tls_error=%d\n", r.tls_error);
+    printf("tls_alert=%d\n", r.tls_alert);
     printf("body_len=%zu\n", r.body_len);
     if (r.body) print_escaped("body", r.body, r.body_len);
     else printf("body=\n");

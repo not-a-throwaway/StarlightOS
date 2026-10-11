@@ -11,10 +11,12 @@
  *   - newlib        : malloc, stdio, string/ctype
  *   - user/slnet.h  : blocking IPv4 TCP sockets (sl_socket/sl_connect/...)
  *
- * so a browser no longer needs kernel privileges to talk HTTP. HTTPS is on the
- * roadmap (M9 lifts the TLS client and adds certificate validation); until then
- * an https:// URL fails with SLWEB_ERR_HTTPS so the browser can show an
- * "unverified connection" badge instead of silently downgrading.
+ * so a browser no longer needs kernel privileges to talk HTTP. M9.4 lifts the
+ * kernel's TLS client (tls.c + crypto.c + x509.c, with tls_user.c as the ring-3
+ * platform layer) into the library: an https:// URL performs a full handshake and
+ * validates the server certificate against a trust store that starts empty, so
+ * roots must be loaded with slweb_http_add_ca_pem()/_file() (or a request can opt
+ * out with opts.insecure). A certificate that does not verify fails closed.
  *
  * The public names are prefixed slweb_ to stay clear of newlib and of the
  * kernel's own url_parse/http_request/html_to_text. The structs deliberately
@@ -39,12 +41,12 @@ extern "C" {
 #define SLWEB_ERR_TIMEOUT     -4   /* no response (timed out)                      */
 #define SLWEB_ERR_MALFORMED   -5   /* malformed HTTP response                      */
 #define SLWEB_ERR_REDIRECTS   -6   /* too many redirects                           */
-#define SLWEB_ERR_TLS         -7   /* TLS handshake failed (reserved for M9)       */
+#define SLWEB_ERR_TLS         -7   /* TLS handshake / certificate verification failed */
 #define SLWEB_ERR_NOMEM       -8   /* out of memory                                */
 #define SLWEB_ERR_INTR        -9   /* interrupted (Ctrl-C)                         */
 #define SLWEB_ERR_NONET      -10   /* network not configured (no DHCP lease yet)   */
 #define SLWEB_ERR_BADURL     -11   /* bad URL                                      */
-#define SLWEB_ERR_HTTPS      -12   /* https:// needs the userland TLS client (M9)  */
+#define SLWEB_ERR_HTTPS      -12   /* https is unavailable in this build           */
 
 /* ---- URL parsing --------------------------------------------------------- */
 /*
@@ -100,6 +102,7 @@ struct slweb_http_opts {
     size_t      max_body;          /* 0 = default (2 MiB)                          */
     int         verbose;           /* print request/response head lines (debug)    */
     int         quiet;             /* suppress redirect progress output            */
+    int         insecure;          /* 1 = skip certificate validation (curl -k)    */
     void      (*progress)(size_t received, int total);   /* optional              */
 };
 struct slweb_response {
@@ -115,14 +118,27 @@ struct slweb_response {
     int      truncated;
     uint32_t elapsed_ms;
     int      redirects;
-    int      tls_error;            /* reserved: SLWEB_ERR_* when TLS fails (M9)    */
+    int      tls_verified;         /* 1 if a certificate chain verified (https)    */
+    char     tls_peer[128];        /* peer certificate CN ("" if none/unknown)     */
+    int      tls_error;            /* TLS_E_* when a handshake failed, else 0      */
     int      tls_alert;            /* server alert byte, -1 if none                */
     int      error;                /* 0 ok, else negative code (see slweb_http_error_text) */
 };
 int  slweb_http_request(const char *url, const struct slweb_http_opts *opts,
                         struct slweb_response *res);
 const char *slweb_http_error_text(int code);
+const char *slweb_http_tls_error_text(int tls_error);
 void slweb_http_response_free(struct slweb_response *res);
+
+/* ---- TLS trust store (M9.4) ----
+ * Roots are PEM certificates; they persist for the life of the process and are
+ * shared with the kernel TLS client's global store. add_ca_pem() returns the
+ * number of certificates added (>= 0) or -1; add_ca_file() reads a PEM bundle
+ * from the filesystem. The store starts empty, so https:// fails closed until
+ * roots are loaded (or a request uses opts.insecure). */
+int  slweb_http_add_ca_pem(const char *pem, size_t len);
+int  slweb_http_add_ca_file(const char *path);
+void slweb_http_reset_ca(void);
 
 /* ================================================================== M5: DOM + box layout
  *

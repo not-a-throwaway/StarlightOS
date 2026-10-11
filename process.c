@@ -11,6 +11,7 @@
 #include "terminal.h"
 #include "kstring.h"
 #include "kheap.h"
+#include "krand.h"
 #include "ksched.h"
 #include "ktime.h"
 #include "gui.h"
@@ -899,6 +900,16 @@ static uint64_t sys_resolve(uint64_t host_addr, uint64_t out_addr)
     return 0;
 }
 
+/* random(buf, len): fill a user buffer with krand_bytes() output. Caps the
+ * length so one call cannot stall the syscall path for long. */
+static uint64_t sys_random(uint64_t addr, uint64_t len)
+{
+    if (len > 4096) return neg(E_INVAL);
+    if (!user_range_valid(addr, len, 1)) return neg(E_FAULT);
+    krand_bytes((void *)(uintptr_t)addr, (size_t)len);
+    return 0;
+}
+
 uint64_t process_syscall(void *frame)
 {
     struct user_registers *r = (struct user_registers *)frame;
@@ -1015,6 +1026,7 @@ uint64_t process_syscall(void *frame)
     case 123: return sys_recv(r->rdi, r->rsi, r->rdx);
     case 124: return sys_poll(r->rdi, r->rsi, (int64_t)r->rdx);
     case 125: return sys_resolve(r->rdi, r->rsi);
+    case 126: return sys_random(r->rdi, r->rsi);
     default: return neg(E_NOSYS);
     }
 }

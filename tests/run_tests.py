@@ -241,12 +241,11 @@ def group_shell(work):
     sq = img.read('SEQ.TXT'); check('disk image: SEQ.TXT integrity', sq == ''.join('%d\n' % i for i in range(1, 4001)).encode(), repr(sq[:60] if sq else sq))
 
 
-def group_net(work):
-    print('\n[network: DHCP ARP ICMP UDP TCP DNS NTP HTTP TLS]')
-    global CA_PEM
-    # An ephemeral CA + server certificate for the TLS checks. Generated here so nothing expires in the repo; the
-    # guest fetches the CA over plain HTTP, then validates the host's openssl s_server against it.
-    tlsdir = tempfile.mkdtemp(prefix='starlighttls')
+def start_tls_server(tlsdir):
+    """Generate an ephemeral CA + server cert (SAN 10.0.2.2,localhost) and start
+    openssl s_server on 18443. Returns the CA PEM bytes and the Popen, so callers
+    can serve /ca.pem to the guest and kill the server when done."""
+    os.makedirs(tlsdir, exist_ok=True)
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{tlsdir}/ca.key',
                     '-out', f'{tlsdir}/ca.crt', '-days', '7300', '-subj', '/CN=StarlightOS Test CA'],
                    check=True, capture_output=True)
@@ -257,10 +256,20 @@ def group_net(work):
     subprocess.run(['openssl', 'x509', '-req', '-in', f'{tlsdir}/srv.csr', '-CA', f'{tlsdir}/ca.crt',
                     '-CAkey', f'{tlsdir}/ca.key', '-CAcreateserial', '-out', f'{tlsdir}/srv.crt', '-days', '7300',
                     '-extfile', f'{tlsdir}/san.ext'], check=True, capture_output=True)
-    CA_PEM = open(f'{tlsdir}/ca.crt', 'rb').read()
-    tls_srv = subprocess.Popen(['openssl', 's_server', '-accept', '18443', '-cert', f'{tlsdir}/srv.crt',
-                                '-key', f'{tlsdir}/srv.key', '-www', '-quiet'],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ca_pem = open(f'{tlsdir}/ca.crt', 'rb').read()
+    proc = subprocess.Popen(['openssl', 's_server', '-accept', '18443', '-cert', f'{tlsdir}/srv.crt',
+                             '-key', f'{tlsdir}/srv.key', '-www', '-quiet'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return ca_pem, proc
+
+
+def group_net(work):
+    print('\n[network: DHCP ARP ICMP UDP TCP DNS NTP HTTP TLS]')
+    global CA_PEM
+    # An ephemeral CA + server certificate for the TLS checks. Generated here so nothing expires in the repo; the
+    # guest fetches the CA over plain HTTP, then validates the host's openssl s_server against it.
+    tlsdir = tempfile.mkdtemp(prefix='starlighttls')
+    CA_PEM, tls_srv = start_tls_server(tlsdir)
     stop = threading.Event()
     http_srv = Threaded(('0.0.0.0', 18001), HTTP)
     threads = [threading.Thread(target=http_srv.serve_forever, daemon=True),
@@ -761,9 +770,12 @@ def group_appnet(work):
 
 def group_web(work):
     print('\n[web: libslweb userland URL + HTTP + HTML on the M2 sockets]')
+    global CA_PEM
     http_srv = Threaded(('0.0.0.0', 18001), HTTP)
     t = threading.Thread(target=http_srv.serve_forever, daemon=True)
     t.start()
+    tlsdir = tempfile.mkdtemp(prefix='starlightwebtls')
+    CA_PEM, tls_srv = start_tls_server(tlsdir)
     vm = VM(DISK, work)
     try:
         if not check('boots to a shell prompt', vm.boot(), vm.log()[-200:]): return
@@ -786,22 +798,26 @@ def group_web(work):
         check('libslweb: HTML rendered to text (links numbered, script skipped)',
               'Big Title' in r and 'bold' in r and '* one' in r and '[1]' in r
               and 'hidden' not in r and '<h1>' not in r, r[-900:])
-        check('libslweb: https deferred to M9 with an unverified notice',
-              'WEBTEST: https err=-12' in r and 'M9' in r, r[-500:])
+        check('libslweb: https handshake runs, cert fails to verify without a trust anchor',
+              'WEBTEST: https err=-7 (TLS handshake failed)' in r
+              and 'WEBTEST: https tls_error=-17 verified=0' in r, r[-500:])
         check('libslweb: connection refused mapped', 'WEBTEST: refused err=-2' in r, r[-500:])
         check('libslweb: bad URL rejected', 'WEBTEST: badurl err=-11' in r, r[-500:])
         check('the app runs to completion', 'WEBTEST: done' in r, r[-500:])
         r = vm.run('echo $?')
         check('exit status 0', r.strip() == '0', r)
     finally:
-        vm.quit(); http_srv.shutdown()
+        vm.quit(); http_srv.shutdown(); tls_srv.kill()
 
 
 def group_browse(work):
     print('\n[browse: M6 DOM + box-layout + CSS + images browser (M1 window + libslweb)]')
+    global CA_PEM
     http_srv = Threaded(('0.0.0.0', 18001), HTTP)
     t = threading.Thread(target=http_srv.serve_forever, daemon=True)
     t.start()
+    tlsdir = tempfile.mkdtemp(prefix='starlightbrowsetls')
+    CA_PEM, tls_srv = start_tls_server(tlsdir)
     vm = VM(DISK, work)
     try:
         if not check('boots to a shell prompt', vm.boot(), vm.log()[-200:]): return
@@ -843,24 +859,56 @@ def group_browse(work):
         r = vm.run('echo $?')
         check('exit status 0', r.strip() == '0', r)
 
-        # An https:// URL is refused with the M9 "unverified connection" notice.
+        # M9.4: https runs the kernel TLS client lifted into libslweb. With no
+        # trust anchor the server certificate fails to verify (fail closed), the
+        # browser prints the TLS error and keeps the "unverified" badge.
         start2 = len(vm.log())
-        vm.type('run BROWSER.ELF https://example.com/\n')
-        check('https page reports an unverified connection',
-              vm.wait_for('BROWSER: https unverified', 20, start2), vm.log()[start2:][-400:])
-        check('https fails with the M9 code and badge text',
-              'BROWSER: error err=-12' in vm.log()[start2:] and 'unverified' in vm.log()[start2:],
+        vm.type('run BROWSER.ELF https://10.0.2.2:18443/\n')
+        check('https page with no trust anchor fails certificate verification',
+              vm.wait_for('BROWSER: tls error=-17 (certificate did not verify)', 25, start2),
+              vm.log()[start2:][-400:])
+        check('https failure is a TLS error, not the old https-unavailable code',
+              'BROWSER: error err=-7 (certificate did not verify)' in vm.log()[start2:],
               vm.log()[start2:][-500:])
         vm.key('q')
-        check('the second run exits', vm.wait_for('BROWSER: done', 10, start2), vm.log()[start2:][-300:])
+        check('the unverified https run exits', vm.wait_for('BROWSER: done', 10, start2), vm.log()[start2:][-300:])
         r = vm.run('echo $?')
-        check('exit status 0 after the https run', r.strip() == '0', r)
+        check('exit status 0 after the unverified https run', r.strip() == '0', r)
+
+        # Load the ephemeral test CA over plain HTTP, then validate against it.
+        r = vm.run('fetch http://10.0.2.2:18001/ca.pem -o CA.PEM')
+        check('browser: downloaded the test CA over plain http', 'Saved' in r, r)
+        start2b = len(vm.log())
+        vm.type('run BROWSER.ELF --cafile CA.PEM https://10.0.2.2:18443/\n')
+        check('browser: --cafile loads the trust roots',
+              vm.wait_for('BROWSER: cafile CA.PEM roots=1', 20, start2b), vm.log()[start2b:][-400:])
+        check('browser: https page fetched with a verified certificate',
+              vm.wait_for('BROWSER: tls verified=1', 20, start2b)
+              and vm.wait_for('BROWSER: fetch status=200', 20, start2b), vm.log()[start2b:][-600:])
+        vm.key('q')
+        check('the verified https run exits', vm.wait_for('BROWSER: done', 10, start2b), vm.log()[start2b:][-300:])
+        r = vm.run('echo $?')
+        check('exit status 0 after the verified https run', r.strip() == '0', r)
+
+        # --insecure skips validation but still fetches.
+        start2c = len(vm.log())
+        vm.type('run BROWSER.ELF --insecure https://10.0.2.2:18443/\n')
+        check('browser: --insecure disables certificate validation',
+              vm.wait_for('BROWSER: insecure certificate validation off', 20, start2c), vm.log()[start2c:][-400:])
+        check('browser: --insecure still fetches the page (unverified)',
+              vm.wait_for('BROWSER: tls verified=0', 20, start2c)
+              and vm.wait_for('BROWSER: fetch status=200', 20, start2c), vm.log()[start2c:][-600:])
+        vm.key('q')
+        check('the insecure https run exits', vm.wait_for('BROWSER: done', 10, start2c), vm.log()[start2c:][-300:])
+        r = vm.run('echo $?')
+        check('exit status 0 after the insecure https run', r.strip() == '0', r)
 
         # M6: the CSS subset + bitmap images, from a data: URI and an HTTP fetch.
         start3 = len(vm.log())
         vm.type('run BROWSER.ELF http://10.0.2.2:18001/m6page\n')
         check('the browser fetches the styled image page',
               vm.wait_for('BROWSER: fetch status=200 type=text/html', 30, start3), vm.log()[start3:][-600:])
+        vm.wait_for('BROWSER: css rules=3 images=2', 30, start3)  # image fetches finish before layout
         m6 = vm.log()[start3:]
         check('css: <style> rules compiled and applied to boxes',
               'BROWSER: css rules=3 images=2' in m6 and 'BROWSER: css applied fg=#3366ff' in m6, m6[-900:])
@@ -955,7 +1003,7 @@ def group_browse(work):
         r = vm.run('echo $?')
         check('exit status 0 after the persistence run', r.strip() == '0', r)
     finally:
-        vm.quit(); http_srv.shutdown()
+        vm.quit(); http_srv.shutdown(); tls_srv.kill()
     bm = Ext2Image(vm.disk).read('BOOKMARKS.TXT')
     check('BOOKMARKS.TXT on disk holds the saved bookmark',
           bm is not None and b'http://10.0.2.2:18001/hello' in bm, repr(bm))
