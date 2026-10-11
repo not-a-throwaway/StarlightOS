@@ -1291,14 +1291,17 @@ static void handle_key(unsigned c)
 static void usage(void)
 {
     static const char page[] =
-        "<h2>BROWSER (M7)</h2>"
+        "<h2>BROWSER (M8)</h2>"
         "<p>Usage: BROWSER.ELF &lt;url&gt;</p>"
         "<p>The page is parsed into a DOM, styled with its CSS subset, laid out "
-        "into boxes and drawn with a built-in 8x8 font; PNG and basesize64 "
+        "into boxes and drawn with a built-in 8x8 font; PNG and base64 "
         "images are decoded and painted.</p>"
-        "<p>M7 adds the address bar (Ctrl-L), back/forward history (b/f), an "
+        "<p>M7 chrome: the address bar (Ctrl-L), back/forward history (b/f), an "
         "HTTP cache, bookmarks (Ctrl-D, then Ctrl-B + 1-9) and HTML forms "
-        "(Tab to move, type to edit, Enter to submit).</p>";
+        "(Tab to move, type to edit, Enter to submit). M8 adds TCP window "
+        "scaling (RFC 7323) with a 128 KiB receive window for faster large "
+        "transfers. TLS certificate validation (M9) is still to come, so "
+        "https:// pages show an unverified-connection badge.</p>";
     free_page();
     nboxes = nlinks = 0;
     doc_h = 0;
