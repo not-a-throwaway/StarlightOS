@@ -105,6 +105,60 @@ add(f"p256ecdh {(5).to_bytes(32,'big').hex()} {(good[:-1] + bytes([good[-1] ^ 1]
 add(f"p256ecdh {(5).to_bytes(32,'big').hex()} 05{good[1:].hex()}", ["FAIL"])
 add(f"p256pub {'00'*32}", ["FAIL"]); add(f"p256pub {N.to_bytes(32,'big').hex()}", ["FAIL"])
 
+add(f"p256pub {'00'*32}", ["FAIL"]); add(f"p256pub {N.to_bytes(32,'big').hex()}", ["FAIL"])
+
+# ---------- M9.1: big-int modexp, RSA (v1.5 + PSS) and ECDSA verification ----------
+from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
+
+def _hb(x):  # minimal big-endian integer to hex (used for moduli/exponents)
+    return x.to_bytes((x.bit_length() + 7) // 8 or 1, "big").hex()
+
+for bits in (512, 1024, 2048, 3072, 4096):
+    for _ in range(3):
+        m = random.getrandbits(bits) | (1 << (bits - 1)) | 1
+        bb = random.randrange(1, m)
+        ee = random.choice([3, 65537, random.randrange(1, 1 << 60)])
+        add(f"modexp {_hb(bb)} {_hb(ee)} {_hb(m)}", [pow(bb, ee, m).to_bytes(bits // 8, "big").hex()])
+
+# RFC 8017 DigestInfo prefixes for SHA-256 / SHA-384.
+DI = {256: "3031300d060960864801650304020105000420", 384: "3041300d060960864801650304020205000430"}
+for bits in (2048, 3072, 4096):
+    for _ in range(3):
+        k = rsa.generate_private_key(public_exponent=65537, key_size=bits)
+        pn = k.public_key().public_numbers()
+        nh, eh = _hb(pn.n), _hb(pn.e)
+        for hn in (256, 384):
+            hf = hashes.SHA256() if hn == 256 else hashes.SHA384()
+            digest = (hashlib.sha256 if hn == 256 else hashlib.sha384)(msg := rb(random.randrange(1, 200))).hexdigest()
+            sig = k.sign(msg, padding.PKCS1v15(), hf)
+            add(f"rsav15 {nh} {eh} {sig.hex()} {DI[hn]}{digest}", ["OK"])
+            add(f"rsav15 {nh} {eh} {sig.hex()} {DI[hn]}{'00' * (hn // 8)}", ["FAIL"])          # wrong digest
+            add(f"rsav15 {nh} {eh} {'00' * (bits // 8)} {DI[hn]}{digest}", ["FAIL"])             # bad signature
+            psig = k.sign(msg, padding.PSS(mgf=padding.MGF1(hf), salt_length=padding.PSS.DIGEST_LENGTH), hf)
+            add(f"rsapss {nh} {eh} {psig.hex()} {hn} {digest}", ["OK"])
+            bad = bytearray(bytes.fromhex(digest)); bad[0] ^= 0xff
+            add(f"rsapss {nh} {eh} {psig.hex()} {hn} {bytes(bad).hex()}", ["FAIL"])              # wrong digest
+            b2 = bytearray(psig); b2[random.randrange(len(b2))] ^= 1 << random.randrange(8)
+            add(f"rsapss {nh} {eh} {bytes(b2).hex()} {hn} {digest}", ["FAIL"])                   # tampered sig
+
+for curve, tag, hn in ((ec.SECP256R1(), "p256", 256), (ec.SECP384R1(), "p384", 384)):
+    fs = 32 if tag == "p256" else 48
+    for _ in range(12):
+        k = ec.generate_private_key(curve)
+        pub = k.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        msg = rb(random.randrange(1, 200))
+        hf = hashes.SHA256() if hn == 256 else hashes.SHA384()
+        r, s = utils.decode_dss_signature(k.sign(msg, ec.ECDSA(hf)))
+        raw = r.to_bytes(fs, "big") + s.to_bytes(fs, "big")
+        digest = (hashlib.sha256 if hn == 256 else hashlib.sha384)(msg).hexdigest()
+        add(f"ecdsaverify {tag} {pub.hex()} {raw.hex()} {digest}", ["OK"])
+        bad = bytearray(raw); bad[random.randrange(len(bad))] ^= 1 << random.randrange(8)
+        add(f"ecdsaverify {tag} {pub.hex()} {bytes(bad).hex()} {digest}", ["FAIL"])               # tampered sig
+        wrong = bytearray(bytes.fromhex(digest)); wrong[0] ^= 0xff
+        add(f"ecdsaverify {tag} {pub.hex()} {raw.hex()} {bytes(wrong).hex()}", ["FAIL"])          # wrong digest
+        off = bytearray(pub); off[1 + random.randrange(2 * fs)] ^= 1 << random.randrange(8)
+        add(f"ecdsaverify {tag} {bytes(off).hex()} {raw.hex()} {digest}", ["FAIL"])               # off-curve key
+
 inp = "\n".join(cases) + "\n"
 out = subprocess.run([cli], input=inp, capture_output=True, text=True).stdout.split("\n")
 pos, fails = 0, 0

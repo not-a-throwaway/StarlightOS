@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdint.h>
 #include "../../crypto.h"
+#include "../../bignum.h"
+#include "../../rsa.h"
+#include "../../ecdsa.h"
 
 static size_t unhex(const char *s, uint8_t *o) { if (!strcmp(s, "-")) return 0; size_t n = strlen(s) / 2; for (size_t i = 0; i < n; i++) { unsigned v; sscanf(s + 2*i, "%2x", &v); o[i] = (uint8_t)v; } return n; }
 static void phex(const uint8_t *p, size_t n) { for (size_t i = 0; i < n; i++) printf("%02x", p[i]); printf("\n"); }
@@ -50,6 +53,10 @@ int main(void)
         else if (!strcmp(op, "x25519base")) { unhex(tok[1], a); uint8_t o[32]; x25519_base(o, a); phex(o, 32); }
         else if (!strcmp(op, "p256pub")) { unhex(tok[1], a); uint8_t o[65]; if (p256_pubkey(o, a)) printf("FAIL\n"); else phex(o, 65); }
         else if (!strcmp(op, "p256ecdh")) { unhex(tok[1], a); unhex(tok[2], b); uint8_t o[32]; if (p256_ecdh(o, a, b)) printf("FAIL\n"); else phex(o, 32); }
+        else if (!strcmp(op, "modexp")) { size_t bl = unhex(tok[1], a), el = unhex(tok[2], b), ml = unhex(tok[3], c); uint8_t o[512]; if (bn_modexp_be(o, a, bl, b, el, c, ml)) printf("FAIL\n"); else phex(o, ml); }
+        else if (!strcmp(op, "rsav15")) { size_t nl = unhex(tok[1], a), el = unhex(tok[2], b), sl = unhex(tok[3], c), dl = unhex(tok[4], d); printf("%s\n", rsa_verify_v15(a, nl, b, el, c, sl, d, dl) == 0 ? "OK" : "FAIL"); }
+        else if (!strcmp(op, "rsapss")) { size_t nl = unhex(tok[1], a), el = unhex(tok[2], b), sl = unhex(tok[3], c), ml = unhex(tok[5], d); int alg = atoi(tok[4]) == 384 ? HASH_SHA384 : HASH_SHA256; printf("%s\n", rsa_verify_pss(a, nl, b, el, c, sl, alg, d, ml) == 0 ? "OK" : "FAIL"); }
+        else if (!strcmp(op, "ecdsaverify")) { size_t pl = unhex(tok[2], a), sl = unhex(tok[3], b), hl = unhex(tok[4], c); int r = !strcmp(tok[1], "p384") ? ecdsa_verify_p384(a, pl, b, sl, c, hl) : ecdsa_verify_p256(a, pl, b, sl, c, hl); printf("%s\n", r == 0 ? "OK" : "FAIL"); }
         fflush(stdout);
     }
     return 0;

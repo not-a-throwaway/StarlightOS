@@ -27,7 +27,7 @@ SRCS = kernel.c idt.c pic.c pit.c rtc.c speaker.c keyboard.c mouse.c \
        font8x8.c font.c font_ttf.c pci.c rtl8139.c vbe.c vga.c gui.c starlightos_gui.c \
        disk.c vfs.c ext2.c devfs.c procfs.c \
        kstring.c kprintf.c serial.c ktime.c ksched.c kheap.c \
-       net.c tcp.c poll.c httpd.c dns.c url.c http.c html.c crypto.c chachapoly.c p256.c krand.c tls.c telnet.c \
+       net.c tcp.c poll.c httpd.c dns.c url.c http.c html.c crypto.c chachapoly.c p256.c krand.c tls.c bignum.c rsa.c ecdsa.c telnet.c \
        ac97.c audio.c \
        shell.c cmd_text.c cmd_net.c cmd_sound.c cmd_unix.c cmd_posix.c
 
@@ -132,9 +132,9 @@ run-chat: starlightos64.elf starlightos64.bin bootsector.bin stage2.bin disk.img
 # Host-only unit tests for the crypto / TLS / telnet code (no QEMU or cross-compiler needed;
 # needs gcc, python3 and the 'cryptography' package).
 hosttest:
-	gcc -O1 -Wall -Wextra -Itests/host -I. -include string.h -o /tmp/starlightos_crypto_cli tests/host/crypto_cli.c crypto.c chachapoly.c p256.c
+	gcc -O1 -Wall -Wextra -Itests/host -I. -o /tmp/starlightos_crypto_cli tests/host/crypto_cli.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c
 	python3 tests/host/crypto_diff.py /tmp/starlightos_crypto_cli
-	gcc -O1 -Wall -Wextra -I. -include string.h -o /tmp/starlightos_telnet_cli tests/host/telnet_cli.c telnet.c
+	gcc -O1 -Wall -Wextra -I. -o /tmp/starlightos_telnet_cli tests/host/telnet_cli.c telnet.c
 	python3 tests/host/telnet_test.py /tmp/starlightos_telnet_cli
 	gcc -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I. -o /tmp/starlightos_html_cli tests/host/html_cli.c html.c
 	python3 tests/host/html_test.py /tmp/starlightos_html_cli
@@ -150,8 +150,8 @@ shelltest: disk.img
 # Covers TLS 1.3 and 1.2, all 3 AEADs, both key-exchange groups, RSA and ECDSA certificates, coalesced records,
 # 300 KB transfers, clean refusals, and 150 corrupted-server-flight sessions under ASan/UBSan.
 tlstest:
-	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -I. -include string.h -o /tmp/starlightos_tls_host tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
-	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -DTLS_TEST_NO_EMS -I. -include string.h -o /tmp/starlightos_tls_host_noems tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
+	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o /tmp/starlightos_tls_host tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
+	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -DTLS_TEST_NO_EMS -o /tmp/starlightos_tls_host_noems tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
 	python3 tests/host/tls_matrix.py /tmp/starlightos_tls_host /tmp/starlightos_tls_host_noems
 	python3 tests/host/tls_fuzz.py /tmp/starlightos_tls_host 150
 
