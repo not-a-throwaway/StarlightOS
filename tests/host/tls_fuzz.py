@@ -8,6 +8,10 @@ host = sys.argv[1]; N = int(sys.argv[2]) if len(sys.argv) > 2 else 150
 tmp = tempfile.mkdtemp(prefix="tlsf")
 for kind, args in (("rsa", ["rsa:2048"]), ("ec", ["ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"])):
     subprocess.run(["openssl", "req", "-x509", "-newkey", *args, "-nodes", "-keyout", f"{tmp}/{kind}.key", "-out", f"{tmp}/{kind}.crt", "-days", "2", "-subj", "/CN=localhost"], check=True, capture_output=True)
+CA = f"{tmp}/ca.pem"                                   # trust both certs: unmutated flights verify, mutated ones fail cleanly
+with open(CA, "wb") as f:
+    for c in ("rsa", "ec"): f.write(open(f"{tmp}/{c}.crt", "rb").read())
+env = dict(os.environ, TLS_CAFILE=CA)
 rnd = random.Random(2026)
 servers = {}
 def server(name, extra, cert, port):
@@ -76,7 +80,7 @@ for i in range(N):
     mode = rnd.randrange(6); cut = rnd.choice([0, 0, 5, 40, 100, 300, 800, 1500, 3000])
     port = proxy_once(up, mode, cut)
     try:
-        r = subprocess.run([host, "127.0.0.1", str(port), "localhost", "/"], capture_output=True, timeout=25)
+        r = subprocess.run([host, "127.0.0.1", str(port), "localhost", "/"], capture_output=True, timeout=25, env=env)
     except subprocess.TimeoutExpired:
         bad += 1; print(f"HANG   server={name} mode={mode} cut={cut}"); continue
     err = r.stderr.decode(errors="replace")

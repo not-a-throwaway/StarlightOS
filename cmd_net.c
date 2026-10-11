@@ -299,7 +299,7 @@ static int cmd_fetch(int argc, char **argv)
 {
     struct http_opts o; memset(&o, 0, sizeof(o));
     o.follow_redirects = 5; o.timeout_ms = 8000;
-    const char *url = NULL, *outfile = NULL, *data = NULL;
+    const char *url = NULL, *outfile = NULL, *data = NULL, *cafile = NULL;
     int out_auto = 0, include = 0, head = 0, force_text = 0, force_raw = 0;
     static char hdrs[512]; hdrs[0] = 0;
     for (int i = 1; i < argc; i++) {
@@ -313,7 +313,8 @@ static int cmd_fetch(int argc, char **argv)
         else if (!strcmp(a, "-t") || !strcmp(a, "--text")) force_text = 1;
         else if (!strcmp(a, "-r") || !strcmp(a, "--raw")) force_raw = 1;
         else if (!strcmp(a, "-L")) o.follow_redirects = 5;
-        else if (!strcmp(a, "-k") || !strcmp(a, "--insecure")) { /* accepted for curl muscle memory: certificates are never validated anyway */ }
+        else if (!strcmp(a, "-k") || !strcmp(a, "--insecure")) o.insecure = 1;
+        else if (!strcmp(a, "--cafile") && i + 1 < argc) cafile = argv[++i];
         else if (!strcmp(a, "--no-redirect")) o.follow_redirects = 0;
         else if (!strcmp(a, "-X") && i + 1 < argc) o.method = argv[++i];
         else if (!strcmp(a, "-d") && i + 1 < argc) { data = argv[++i]; if (!o.method) o.method = "POST"; }
@@ -331,13 +332,26 @@ static int cmd_fetch(int argc, char **argv)
                 "  -v       verbose (request+headers)   -q  quiet (no status lines)\n"
                 "  -X METH  method   -d DATA  POST data   -H 'K: V'  extra header\n"
                 "  -m SECS  timeout  --max BYTES  size cap   --no-redirect\n"
-                "http:// and https:// (TLS 1.3; the server certificate is NOT validated). Redirects are followed.\n");
+                "  --cafile FILE  trust the PEM certificates in FILE (https)\n"
+                "  -k       do not verify the server certificate (https)\n"
+                "http:// and https:// (TLS 1.3; https certificates are validated against --cafile). Redirects are followed.\n");
         return 1;
     }
     if (!need_net()) return 1;
     if (data) { o.body = data; o.body_len = strlen(data); if (!strstr(hdrs, "Content-Type")) strlcat(hdrs, "Content-Type: application/x-www-form-urlencoded\r\n", sizeof(hdrs)); }
     if (hdrs[0]) o.extra_headers = hdrs;
     if (outfile || out_auto) o.progress = on_progress;
+
+    if (cafile) {
+        static char cabuf[65536];
+        uint32_t cn = 0;
+        int vr = vfs_read_all(cafile, cabuf, sizeof(cabuf) - 1, &cn);
+        if (vr != 0) { err("fetch: cannot read %s (%s)\n", cafile, vfs_strerror(vr)); return 1; }
+        tls_ca_reset();
+        int k = tls_ca_add_pem(cabuf, cn);
+        if (k <= 0) { err("fetch: no usable CA certificates in %s\n", cafile); return 1; }
+        if (o.verbose) kprintf("* loaded %d CA certificate(s) from %s\n", k, cafile);
+    }
 
     static char urlbuf[256];
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) ksnprintf(urlbuf, sizeof(urlbuf), "http://%s", url); else strlcpy(urlbuf, url, sizeof(urlbuf));
@@ -353,6 +367,8 @@ static int cmd_fetch(int argc, char **argv)
             err("\n");
             if (r.tls_error == TLS_E_UNSUPPORTED || r.tls_alert == 70 || r.tls_alert == 40 || r.tls_alert == 71)
                 err("  StarlightOS speaks TLS 1.3 and 1.2 (ECDHE: x25519 or P-256); this server may want HelloRetryRequest, a client certificate, or something else unsupported.\n");
+            if (r.tls_error == TLS_E_CERT)
+                err("  add the issuing CA with --cafile FILE, or use -k to accept the certificate unchecked.\n");
             if (r.redirects) err("  (redirected %d time(s) to %s)\n", r.redirects, r.final_url);
         }
         http_response_free(&r);
@@ -360,10 +376,11 @@ static int cmd_fetch(int argc, char **argv)
     }
     if (!o.quiet) {
         uint32_t rate = r.elapsed_ms ? (uint32_t)((uint64_t)r.body_len * 1000u / r.elapsed_ms / 1024u) : 0;
+        const char *tlsnote = strncasecmp(r.final_url, "https://", 8) ? "" : (r.tls_verified ? "  [TLS verified]" : "  [TLS unverified]");
         fg(r.status >= 400 ? C_LRED : r.status >= 300 ? C_YELLOW : C_LGREEN);
         kprintf("%d %s", r.status, r.status_text); fg(C_DGRAY);
-        kprintf("  %s  %u bytes in %u ms (%u KB/s)%s%s\n", r.content_type[0] ? r.content_type : "unknown type", (unsigned)r.body_len, r.elapsed_ms, rate,
-                r.redirects ? "  [redirected]" : "", r.truncated ? "  [TRUNCATED]" : "");
+        kprintf("  %s  %u bytes in %u ms (%u KB/s)%s%s%s\n", r.content_type[0] ? r.content_type : "unknown type", (unsigned)r.body_len, r.elapsed_ms, rate,
+                r.redirects ? "  [redirected]" : "", r.truncated ? "  [TRUNCATED]" : "", tlsnote);
         fg_reset();
     }
     if (include) kprintf("%s\n", r.headers);

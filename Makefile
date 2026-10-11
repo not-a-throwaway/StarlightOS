@@ -152,8 +152,8 @@ shelltest: disk.img
 # Covers TLS 1.3 and 1.2, all 3 AEADs, both key-exchange groups, RSA and ECDSA certificates, coalesced records,
 # 300 KB transfers, clean refusals, and 150 corrupted-server-flight sessions under ASan/UBSan.
 tlstest:
-	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o /tmp/starlightos_tls_host tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
-	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -DTLS_TEST_NO_EMS -o /tmp/starlightos_tls_host_noems tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c
+	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o /tmp/starlightos_tls_host tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c x509.c
+	gcc -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -DTLS_TEST_NO_EMS -o /tmp/starlightos_tls_host_noems tests/host/tls_host.c tls.c crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c x509.c
 	python3 tests/host/tls_matrix.py /tmp/starlightos_tls_host /tmp/starlightos_tls_host_noems
 	python3 tests/host/tls_fuzz.py /tmp/starlightos_tls_host 150
 

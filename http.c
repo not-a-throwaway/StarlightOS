@@ -108,13 +108,18 @@ static int single_request(const struct url_parts *u, const struct http_opts *o, 
     if (u->https) {
         int terr = 0;
         tls_set_trace(o->verbose);
+        tls_set_verify(!o->insecure);
         st.tls = tls_connect(sock, u->host, o->timeout_ms ? o->timeout_ms : 8000, &terr);
         if (!st.tls) {
             res->tls_error = terr; res->tls_alert = tls_last_alert();
             tcp_abort(sock);
             return terr == TLS_E_ABORT ? -9 : -7;
         }
-        if (o->verbose) kprintf("* %s (server certificate NOT verified)\n", tls_describe(st.tls));
+        res->tls_verified = tls_verify_result(st.tls) == 0;
+        ksnprintf(res->tls_peer, sizeof(res->tls_peer), "%s", tls_peer_cn(st.tls));
+        if (o->verbose) kprintf("* %s (%s%s%s)\n", tls_describe(st.tls),
+            res->tls_verified ? "certificate verified" : "certificate NOT verified",
+            res->tls_peer[0] ? ": " : "", res->tls_peer);
     }
 
     /* ---- request ---- */

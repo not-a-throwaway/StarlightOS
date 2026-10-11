@@ -140,6 +140,7 @@ struct http_opts {
     size_t      max_body;          /* 0 = default (4 MiB) */
     int         verbose;           /* print request/response head lines */
     int         quiet;             /* suppress progress output */
+    int         insecure;          /* skip server-certificate verification (-k) */
     void      (*progress)(size_t received, int total);   /* optional */
 };
 struct http_response {
@@ -157,6 +158,8 @@ struct http_response {
     int      redirects;
     int      tls_error;            /* TLS_E_* when error == -7 (TLS handshake failed), else 0 */
     int      tls_alert;            /* server alert description byte, -1 if none */
+    int      tls_verified;         /* https: 1 if the chain verified, 0 if not checked (no --cafile / --insecure) */
+    char     tls_peer[96];         /* https: leaf certificate commonName */
     int      error;                /* 0 ok, else negative code (see http_error_text) */
 };
 int  http_request(const char *url, const struct http_opts *opts, struct http_response *res);

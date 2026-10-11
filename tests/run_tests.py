@@ -51,6 +51,8 @@ def png_bytes(w, h, rows_rgba):
 PNG_SMALL = png_bytes(2, 2, [[255, 0, 0, 255, 0, 255, 0, 255],
                              [0, 0, 255, 255, 255, 255, 255, 128]])
 
+CA_PEM = b''   # PEM of the ephemeral test CA, served as /ca.pem for the guest to fetch (set in group_net)
+
 class HTTP(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *a): pass
@@ -72,7 +74,8 @@ class HTTP(http.server.BaseHTTPRequestHandler):
         elif p == '/loop': self.send(302, b'', extra={'Location': '/loop'})
         elif p == '/chunked': self.send(200, chunked_bytes(5000), 'application/octet-stream', chunked=True)
         elif p == '/big': self.send(200, big_bytes(300000), 'application/octet-stream')
-        elif p == '/https': self.send(302, b'', extra={'Location': 'https://example.com/'})
+        elif p == '/https': self.send(302, b'', extra={'Location': 'https://10.0.2.2:18443/'})
+        elif p == '/ca.pem': self.send(200, CA_PEM, 'application/x-pem-file')
         elif p == '/lines': self.send(200, ''.join('line %03d alpha\n' % i for i in range(120)).encode())
         elif p == '/page':
             self.send(200, b'<html><head><title>T</title><style>p{color:red}</style></head><body><h1>Big Title</h1>'
@@ -239,7 +242,25 @@ def group_shell(work):
 
 
 def group_net(work):
-    print('\n[network: DHCP ARP ICMP UDP TCP DNS NTP HTTP]')
+    print('\n[network: DHCP ARP ICMP UDP TCP DNS NTP HTTP TLS]')
+    global CA_PEM
+    # An ephemeral CA + server certificate for the TLS checks. Generated here so nothing expires in the repo; the
+    # guest fetches the CA over plain HTTP, then validates the host's openssl s_server against it.
+    tlsdir = tempfile.mkdtemp(prefix='starlighttls')
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{tlsdir}/ca.key',
+                    '-out', f'{tlsdir}/ca.crt', '-days', '7300', '-subj', '/CN=StarlightOS Test CA'],
+                   check=True, capture_output=True)
+    with open(f'{tlsdir}/san.ext', 'w') as f:
+        f.write('subjectAltName=IP:10.0.2.2,DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n')
+    subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{tlsdir}/srv.key',
+                    '-out', f'{tlsdir}/srv.csr', '-subj', '/CN=10.0.2.2'], check=True, capture_output=True)
+    subprocess.run(['openssl', 'x509', '-req', '-in', f'{tlsdir}/srv.csr', '-CA', f'{tlsdir}/ca.crt',
+                    '-CAkey', f'{tlsdir}/ca.key', '-CAcreateserial', '-out', f'{tlsdir}/srv.crt', '-days', '7300',
+                    '-extfile', f'{tlsdir}/san.ext'], check=True, capture_output=True)
+    CA_PEM = open(f'{tlsdir}/ca.crt', 'rb').read()
+    tls_srv = subprocess.Popen(['openssl', 's_server', '-accept', '18443', '-cert', f'{tlsdir}/srv.crt',
+                                '-key', f'{tlsdir}/srv.key', '-www', '-quiet'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     stop = threading.Event()
     http_srv = Threaded(('0.0.0.0', 18001), HTTP)
     threads = [threading.Thread(target=http_srv.serve_forever, daemon=True),
@@ -271,12 +292,22 @@ def group_net(work):
         r = vm.run('fetch -d "a=1&b=2" http://10.0.2.2:18001/post'); check('fetch -d POSTs data with content-type', 'got:a=1&b=2|application/x-www-form-urlencoded' in r, r)
         r = vm.run('fetch http://10.0.2.2:18001/page'); check('fetch renders HTML as text', 'Big Title' in r and 'bold' in r and '&amp;' not in r and '<h1>' not in r and 'hidden' not in r and '[1]' in r, r)
         r = vm.run('fetch -r http://10.0.2.2:18001/page'); check('fetch -r prints raw HTML', '<h1>Big Title</h1>' in r, r)
-        r = vm.run('fetch http://10.0.2.2:18001/https'); check('https is refused clearly (no TLS)', 'not supported' in r or 'no TLS' in r, r)
+        r = vm.run('fetch http://10.0.2.2:18001/https', timeout=25); check('redirect to https without a trusted CA is refused', 'did not verify' in r, r)
         r = vm.run('fetch http://10.0.2.2:18001/lines | grep -c alpha', timeout=20); check('fetch | grep pipeline (raw body in pipe)', r.strip().split()[-1] == '120', r)
         r = vm.run('fetch http://10.0.2.2:18001/chunked -o CH.BIN', timeout=20); check('fetch -o chunked save', 'Saved 5000 bytes' in r, r)
         r = vm.run('fetch http://10.0.2.2:18001/big -o BIG.BIN', timeout=90); check('fetch -o 300 KB save', 'Saved 300000 bytes' in r, r)
         r = vm.run('fetch -O http://10.0.2.2:18001/hello'); check('fetch -O names file from URL', 'Saved 29 bytes to HELLO' in r, r)
         r = vm.run('fetch http://10.0.2.2:1/', timeout=20); check('connection refused reported', 'connection failed' in r, r)
+
+        # ---- TLS certificate validation (kernel tls.c + x509.c) against the host's openssl s_server
+        r = vm.run('fetch https://10.0.2.2:18443/', timeout=25)
+        check('https: an untrusted server is refused', 'did not verify' in r, r)
+        r = vm.run('fetch -k https://10.0.2.2:18443/', timeout=25)
+        check('https: -k accepts the certificate unchecked', '200 ok' in r.lower() and 'tls unverified' in r.lower(), r)
+        r = vm.run('fetch http://10.0.2.2:18001/ca.pem -o CA.PEM')
+        check('https: download the test CA over plain http', 'Saved' in r, r)
+        r = vm.run('fetch --cafile CA.PEM https://10.0.2.2:18443/', timeout=25)
+        check('https: chain validates against --cafile', '200 ok' in r.lower() and 'tls verified' in r.lower(), r)
 
         r = vm.run('nslookup a.test 10.0.2.2:15353'); check('DNS A record via custom server', 'Address: 1.2.3.4' in r, r)
         r = vm.run('nslookup www.test 10.0.2.2:15353'); check('DNS CNAME chain parsed (compressed names)', 'alias for a.test' in r and 'Address: 9.8.7.6' in r, r)
@@ -312,7 +343,7 @@ def group_net(work):
         r = vm.run('netstat -s'); check('netstat counters', 'TCP   rx' in r and 'retransmits' in r and 'window-scaled' in r, r)
         r = vm.run('netstat'); check('netstat table has a WS column', 'WS' in r and ('tcp' in r or 'Proto' in r), r)
     finally:
-        vm.quit(); stop.set(); http_srv.shutdown()
+        vm.quit(); stop.set(); http_srv.shutdown(); tls_srv.kill()
     img = Ext2Image(vm.disk)
     ch = img.read('CH.BIN'); check('disk image: chunked download is byte-exact', ch == chunked_bytes(5000), f'{None if ch is None else len(ch)}')
     big = img.read('BIG.BIN'); check('disk image: 300 KB download is byte-exact', big == big_bytes(300000), f'{None if big is None else len(big)}')

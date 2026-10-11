@@ -9,12 +9,15 @@
  *                 TLS 1.2: ECDHE-{ECDSA,RSA}-{CHACHA20-POLY1305, AES128-GCM-SHA256, AES256-GCM-SHA384}
  *
  * What it does: full handshake incl. verifying the server's Finished MAC, encrypted records, ticket skipping,
- * KeyUpdate (1.3), close_notify, SNI, a ClientHello padded past the old F5 256-511 byte bug.
+ * KeyUpdate (1.3), close_notify, SNI, a ClientHello padded past the old F5 256-511 byte bug. The server's
+ * certificate chain is validated against a CA store and the CertificateVerify (1.3) / ServerKeyExchange (1.2)
+ * signature is verified with the leaf certificate's RSA/ECDSA key (x509.c).
  *
- * What it deliberately does NOT do: it does not validate the server's certificate chain or the
- * CertificateVerify / ServerKeyExchange signature (that needs X.509 + RSA/ECDSA + a CA store). Traffic is
- * encrypted and integrity-protected, but a man-in-the-middle can impersonate the server. Also unsupported:
- * HelloRetryRequest, client certificates, session resumption, TLS 1.1 and older, RSA key exchange.
+ * Verification is on by default and fails closed: with no trusted roots loaded every chain is rejected, so load
+ * a CA bundle with tls_ca_add_pem() or call tls_set_verify(0) to accept any certificate (curl's -k).
+ *
+ * Still unsupported: HelloRetryRequest, client certificates, session resumption, TLS 1.1 and older, RSA key
+ * exchange, Ed25519 certificates, and checking revocation (CRL/OCSP).
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -27,7 +30,8 @@ enum {
     TLS_E_UNSUPPORTED = -13,   /* server insists on something we don't implement */
     TLS_E_ALERT       = -14,   /* server sent a fatal alert (tls_last_alert()) */
     TLS_E_MAC         = -15,   /* record MAC / server Finished did not verify */
-    TLS_E_NOMEM       = -16
+    TLS_E_NOMEM       = -16,
+    TLS_E_CERT        = -17    /* the server's certificate chain / signature did not verify */
 };
 
 struct tls_conn;
@@ -48,4 +52,15 @@ const char *tls_describe(const struct tls_conn *c);   /* "TLSv1.3 TLS_AES_128_GC
 
 /* Prints each handshake step (what we offered, what the server chose, where it failed) with kprintf. */
 void tls_set_trace(int on);
+
+/* ---- certificate verification ------------------------------------------------
+ * On by default: the peer chain is validated against a trust store and the
+ * CertificateVerify / ServerKeyExchange signature is checked. The store starts
+ * empty, so with no roots loaded every chain fails (fail closed). Add roots from
+ * a PEM bundle with tls_ca_add_pem(), or call tls_set_verify(0) to skip checking. */
+void tls_set_verify(int on);                          /* 0 = accept any certificate (-k) */
+int  tls_ca_add_pem(const char *pem, size_t len);     /* adds every CERTIFICATE block; returns blocks, or -1 */
+void tls_ca_reset(void);                              /* forget roots added with tls_ca_add_pem() */
+int  tls_verify_result(const struct tls_conn *c);     /* 0 verified, 1 not checked, <0 X509_ERR_* on failure */
+const char *tls_peer_cn(const struct tls_conn *c);    /* leaf commonName ("example.com"), or "" */
 #endif

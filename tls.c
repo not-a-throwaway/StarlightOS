@@ -4,9 +4,11 @@
  *   ClientHello (x25519 + P-256 key shares, 9 cipher suites, SNI, EMS, padding)
  *     -> ServerHello decides the version:
  *        1.3: derive handshake keys, stream EncryptedExtensions/Certificate/CertificateVerify/Finished
- *             through a small parser (only Finished is verified), client Finished, application keys.
+ *             through a small parser (the CertificateVerify signature and the Certificate chain are verified),
+ *             client Finished, application keys.
  *        1.2: stream Certificate/ServerKeyExchange/ServerHelloDone, ClientKeyExchange, master secret via the
- *             PRF (extended master secret when negotiated), CCS + Finished both ways.
+ *             PRF (extended master secret when negotiated), CCS + Finished both ways (the ServerKeyExchange
+ *             signature and the Certificate chain are verified).
  *   All large state lives in the heap-allocated tls_conn: the 32-bit kernel stack is only 16 KiB.
  */
 #include "tls.h"
@@ -18,11 +20,13 @@
 #include "kprintf.h"
 #include "ktime.h"
 #include "ksched.h"
+#include "x509.h"
 
 #define REC_MAX_PLAIN   16384
 #define REC_MAX_CIPHER  (REC_MAX_PLAIN + 2048)
 #define HS_MAX_BYTES    (512u * 1024u)
 #define HS_KEEP         1200                       /* largest handshake body kept in memory (ServerKeyExchange, Finished) */
+#define CERT_MAX        (16 * 1024)                /* largest TLS Certificate message we accept (a few KB in practice) */
 
 enum { CT_CCS = 20, CT_ALERT = 21, CT_HANDSHAKE = 22, CT_APPDATA = 23 };
 enum { HS_HELLO_REQUEST = 0, HS_CLIENT_HELLO = 1, HS_SERVER_HELLO = 2, HS_NEW_SESSION_TICKET = 4, HS_ENCRYPTED_EXT = 8,
@@ -103,6 +107,17 @@ struct tls_conn {
     uint8_t   th_before_fin[48];
     size_t    hs_bytes;
     uint8_t   srv_kx[65]; size_t srv_kx_len; int srv_group;     /* 1.2 ServerKeyExchange */
+    /* certificate verification */
+    int       verify;                     /* 1 = validate chain + hostname + handshake signature */
+    const char *host;                     /* server name for the hostname check (NULL for IP literals) */
+    uint8_t   crandom[32], srandom[32];   /* TLS 1.2 ServerKeyExchange signature input */
+    uint8_t   certbuf[CERT_MAX];          /* raw Certificate handshake body */
+    size_t    cert_body_len;
+    const uint8_t *chain_der[X509_MAX_CHAIN]; size_t chain_len[X509_MAX_CHAIN]; int chain_n;
+    struct x509_cert leaf; int have_leaf;
+    uint8_t   th_before_cv[HASH_MAX_LEN]; /* 1.3 transcript hash before CertificateVerify */
+    int       verify_result;              /* 0 verified, 1 not checked, <0 X509_ERR_* */
+    char      peer[96];                   /* leaf commonName */
     uint8_t   desc[96];
 };
 
@@ -111,6 +126,59 @@ static int g_trace;
 
 void tls_set_trace(int on) { g_trace = on; }
 int tls_last_alert(void) { return g_last_alert; }
+
+/* ------------------------------------------------------------ trust store */
+static struct x509_store g_store;
+static uint8_t          *g_owned[X509_MAX_TRUSTED];  /* kmalloc'd copies behind added roots */
+static int               g_owned_n;
+static int               g_verify = 1;
+static uint8_t           g_pem_scratch[8192];
+
+struct ca_ctx { int added; };
+static int ca_add_cb(const uint8_t *der, size_t derlen, void *user)
+{
+    struct ca_ctx *cx = (struct ca_ctx *)user;
+    uint8_t *copy = (uint8_t *)kmalloc(derlen ? derlen : 1);
+    if (!copy) return -1;
+    memcpy(copy, der, derlen);
+    if (x509_store_add_der(&g_store, copy, derlen) != 0) { kfree(copy); return -1; }
+    if (g_owned_n < X509_MAX_TRUSTED) g_owned[g_owned_n++] = copy;
+    cx->added++;
+    return 0;
+}
+
+int tls_ca_add_pem(const char *pem, size_t len)
+{
+    struct ca_ctx cx = { 0 };
+    int n = x509_pem_foreach(pem, len, g_pem_scratch, sizeof g_pem_scratch, ca_add_cb, &cx);
+    return n < 0 ? -1 : cx.added;
+}
+
+void tls_ca_reset(void)
+{
+    for (int i = 0; i < g_owned_n; i++) { kfree(g_owned[i]); g_owned[i] = NULL; }
+    g_owned_n = 0;
+    x509_store_init(&g_store);
+}
+
+void tls_set_verify(int on) { g_verify = on; }
+
+int tls_verify_result(const struct tls_conn *c) { return c ? c->verify_result : 1; }
+const char *tls_peer_cn(const struct tls_conn *c) { return c && c->peer[0] ? c->peer : ""; }
+
+/* TLS SignatureScheme / SignatureAndHashAlgorithm -> X509_SIG_*. */
+static int tls_sigscheme(unsigned s)
+{
+    switch (s) {
+    case 0x0401: return X509_SIG_RSA_PKCS1_SHA256;
+    case 0x0501: return X509_SIG_RSA_PKCS1_SHA384;
+    case 0x0804: return X509_SIG_RSA_PSS_SHA256;
+    case 0x0805: return X509_SIG_RSA_PSS_SHA384;
+    case 0x0403: return X509_SIG_ECDSA_SHA256;
+    case 0x0503: return X509_SIG_ECDSA_SHA384;
+    default:     return X509_SIG_UNKNOWN;
+    }
+}
 #define TR(...) do { if (g_trace) kprintf(__VA_ARGS__); } while (0)
 
 const char *tls_alert_name(int d)
@@ -152,6 +220,7 @@ const char *tls_error_text(int e)
     case TLS_E_ALERT:      return "server sent a TLS alert";
     case TLS_E_MAC:        return "TLS integrity check failed";
     case TLS_E_NOMEM:      return "out of memory";
+    case TLS_E_CERT:       return "server certificate did not verify (unknown CA, wrong host, expired, or bad signature)";
     default:               return "TLS error";
     }
 }
@@ -303,6 +372,109 @@ static int fail_alert(const uint8_t *alert, size_t len)
     return TLS_E_ALERT;
 }
 
+/* ------------------------------------------------------------ peer certificate */
+/* Extract the chain from the raw Certificate body and, when verification is on,
+ * validate it (chain + hostname + validity) against the trust store. */
+static int tls_process_certificate(struct tls_conn *c)
+{
+    int v13 = c->version == 0x0304;
+    const uint8_t *b = c->certbuf, *end = c->certbuf + c->cert_body_len;
+    if (v13) {                                             /* certificate_request_context */
+        if (b >= end) return -1;
+        size_t ctx = *b++;
+        if (b + ctx > end) return -1;
+        b += ctx;
+    }
+    if (b + 3 > end) return -1;
+    size_t list = ((size_t)b[0] << 16) | ((size_t)b[1] << 8) | b[2];
+    b += 3;
+    if (b + list != end) return -1;
+
+    c->chain_n = 0;
+    const uint8_t *p = b, *lend = b + list;
+    while (p < lend) {
+        if (p + 3 > lend) return -1;
+        size_t cl = ((size_t)p[0] << 16) | ((size_t)p[1] << 8) | p[2];
+        p += 3;
+        if (p + cl > lend) return -1;
+        if (c->chain_n < X509_MAX_CHAIN) { c->chain_der[c->chain_n] = p; c->chain_len[c->chain_n] = cl; c->chain_n++; }
+        p += cl;
+        if (v13) {                                         /* per-certificate extensions */
+            if (p + 2 > lend) return -1;
+            size_t el = ((size_t)p[0] << 8) | p[1];
+            p += 2;
+            if (p + el > lend) return -1;
+            p += el;
+        }
+    }
+    if (c->chain_n < 1) return -1;
+
+    c->have_leaf = x509_parse(&c->leaf, c->chain_der[0], c->chain_len[0]) == X509_OK;
+    if (c->have_leaf && c->leaf.cn_len) {
+        size_t n = c->leaf.cn_len < sizeof(c->peer) - 1 ? c->leaf.cn_len : sizeof(c->peer) - 1;
+        memcpy(c->peer, c->leaf.cn, n); c->peer[n] = 0;
+    }
+    if (!c->verify) { TR("* TLS: peer certificate %s%s%s (not verified)\n", c->peer[0] ? "CN=" : "(no CN)",
+                         c->peer, c->chain_n > 1 ? ", with intermediates" : ""); return 0; }
+    c->verify_result = x509_verify_chain(c->chain_der, c->chain_len, c->chain_n, &g_store,
+                                         c->host, (int64_t)ktime_unix());
+    if (c->verify_result != X509_OK) {
+        TR("* TLS: certificate verification failed (%d) for %s\n", c->verify_result, c->host ? c->host : "-");
+        return -1;
+    }
+    TR("* TLS: certificate verified: %s (%d cert chain)\n", c->peer[0] ? c->peer : "?", c->chain_n);
+    return 0;
+}
+
+/* RFC 8446 4.4.3: the CertificateVerify input is 64 spaces, a context string, a
+ * NUL and the transcript hash through the Certificate (not CertificateVerify). */
+static int tls_verify_certverify(struct tls_conn *c)
+{
+    const uint8_t *b = c->keepbuf; size_t l = c->body_len;
+    if (l < 4) return -1;
+    unsigned scheme = get16(b);
+    size_t sl = get16(b + 2);
+    if (4 + sl != l) return -1;
+    if (!c->verify) return 0;
+    if (!c->have_leaf) return -1;
+    int sc = tls_sigscheme(scheme);
+    if (!sc) return -1;
+    static const char ctx[] = "TLS 1.3, server CertificateVerify";
+    size_t hl = hash_len(c->suite->hash);
+    uint8_t msg[64 + sizeof(ctx) - 1 + 1 + HASH_MAX_LEN];
+    memset(msg, 0x20, 64);
+    memcpy(msg + 64, ctx, sizeof(ctx) - 1);
+    msg[64 + sizeof(ctx) - 1] = 0;
+    memcpy(msg + 64 + sizeof(ctx), c->th_before_cv, hl);
+    if (x509_verify_sig(&c->leaf.pubkey, sc, msg, 64 + sizeof(ctx) + hl, b + 4, sl) != 0) {
+        TR("* TLS: CertificateVerify signature did not verify\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* TLS 1.2 7.4.3: ServerKeyExchange signs client_random || server_random || params.
+ * `k`/`l` is the kept body and `params_len` covers the ServerECDHParams. */
+static int tls_verify_ske(struct tls_conn *c, const uint8_t *k, size_t l, size_t params_len)
+{
+    if (!c->verify) return 0;
+    if (!c->have_leaf) return -1;
+    if (params_len + 4 > l) return -1;
+    unsigned scheme = get16(k + params_len);
+    size_t sl = get16(k + params_len + 2);
+    if (params_len + 4 + sl != l) return -1;
+    int sc = tls_sigscheme(scheme);
+    if (!sc) return -1;                                     /* TLS 1.2 RSA-PSS is allowed (RFC 8446 B.3 / 4.2.3) */
+    uint8_t msg[64 + 128];
+    if (params_len > sizeof(msg) - 64) return -1;
+    memcpy(msg, c->crandom, 32); memcpy(msg + 32, c->srandom, 32); memcpy(msg + 64, k, params_len);
+    if (x509_verify_sig(&c->leaf.pubkey, sc, msg, 64 + params_len, k + params_len + 4, sl) != 0) {
+        TR("* TLS: ServerKeyExchange signature did not verify\n");
+        return -1;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------ handshake message stream */
 static int hs_message_done(struct tls_conn *c)
 {
@@ -314,6 +486,8 @@ static int hs_message_done(struct tls_conn *c)
         c->got_fin = 1; break;
     case HS_CERTIFICATE:
         if (v13 && (!c->got_ee || c->got_cert)) return TLS_E_PROTO;
+        c->cert_body_len = c->body_len;
+        if (tls_process_certificate(c)) return TLS_E_CERT;
         c->got_cert = 1; break;
     case HS_CERT_REQUEST:
         if (v13) return TLS_E_UNSUPPORTED;                                  /* we have no client certificate to give */
@@ -321,17 +495,22 @@ static int hs_message_done(struct tls_conn *c)
     default:
         if (v13) {
             if (c->msg_type == HS_ENCRYPTED_EXT) { if (c->got_ee) return TLS_E_PROTO; c->got_ee = 1; }
-            else if (c->msg_type == HS_CERT_VERIFY) { if (!c->got_cert || c->got_cv) return TLS_E_PROTO; c->got_cv = 1; }
+            else if (c->msg_type == HS_CERT_VERIFY) {
+                if (!c->got_cert || c->got_cv) return TLS_E_PROTO;
+                if (tls_verify_certverify(c)) return TLS_E_CERT;
+                c->got_cv = 1;
+            }
             else if (c->msg_type != HS_NEW_SESSION_TICKET) return TLS_E_PROTO;
         } else {
             if (c->msg_type == HS_SERVER_KEY_EXCHANGE) {
-                /* ECParameters: curve_type(1)=3 named_curve, curve(2), point_len(1), point; then the (ignored) signature */
+                /* ECParameters: curve_type(1)=3 named_curve, curve(2), point_len(1), point; then signature */
                 const uint8_t *k = c->keepbuf; size_t l = c->body_len;
                 if (l < 4 || k[0] != 3) return TLS_E_UNSUPPORTED;
                 c->srv_group = (int)get16(k + 1);
                 size_t pl = k[3];
                 if (4 + pl > l || pl > sizeof(c->srv_kx)) return TLS_E_PROTO;
                 memcpy(c->srv_kx, k + 4, pl); c->srv_kx_len = pl;
+                if (tls_verify_ske(c, k, l, 4 + pl)) return TLS_E_CERT;
                 c->got_ske = 1;
             } else if (c->msg_type == HS_SERVER_HELLO_DONE) {
                 if (c->body_len != 0) return TLS_E_PROTO;
@@ -357,9 +536,13 @@ static int hs_consume(struct tls_conn *c, const uint8_t *d, size_t n)
             c->msg_type = c->hdr[0];
             c->body_len = ((size_t)c->hdr[1] << 16) | ((size_t)c->hdr[2] << 8) | c->hdr[3];
             c->body_got = 0;
-            c->keep = (c->msg_type == HS_FINISHED) || (c->version == 0x0303 && c->msg_type == HS_SERVER_KEY_EXCHANGE);
+            c->keep = (c->msg_type == HS_FINISHED)
+                   || (c->version == 0x0304 && c->msg_type == HS_CERT_VERIFY)
+                   || (c->version == 0x0303 && c->msg_type == HS_SERVER_KEY_EXCHANGE);
             if (c->keep && c->body_len > HS_KEEP) return TLS_E_PROTO;
+            if (c->msg_type == HS_CERTIFICATE && c->body_len > CERT_MAX) return TLS_E_PROTO;
             if (c->msg_type == HS_FINISHED) th_get(c, c->suite->hash, c->th_before_fin);   /* transcript *without* Finished */
+            if (c->version == 0x0304 && c->msg_type == HS_CERT_VERIFY) th_get(c, c->suite->hash, c->th_before_cv);
             th_update(c, c->hdr, 4);
             if (c->body_len == 0) { int r = hs_message_done(c); if (r) return r; }
             continue;
@@ -367,6 +550,7 @@ static int hs_consume(struct tls_conn *c, const uint8_t *d, size_t n)
         size_t take = c->body_len - c->body_got; if (take > n) take = n;
         th_update(c, d, take);
         if (c->keep) memcpy(c->keepbuf + c->body_got, d, take);
+        if (c->msg_type == HS_CERTIFICATE) memcpy(c->certbuf + c->body_got, d, take);
         d += take; n -= take; c->body_got += take;
         if (c->body_got == c->body_len) { int r = hs_message_done(c); if (r) return r; }
     }
@@ -674,6 +858,8 @@ static int handshake(struct tls_conn *c, const char *host, uint32_t tmo)
 
     uint8_t ip[4];
     const char *sni = (host && !net_parse_ip(host, ip)) ? host : NULL;
+    c->host = sni;                                          /* IP literals skip the hostname check too */
+    memcpy(c->crandom, crandom, 32);
     int len = build_client_hello(c->chbuf, crandom, sid, xpub, ppub, sni);
     sha256_init(&c->th256); sha384_init(&c->th384);
     th_update(c, c->chbuf, (size_t)len);
@@ -706,6 +892,7 @@ static int handshake(struct tls_conn *c, const char *host, uint32_t tmo)
 
     uint8_t srandom[32];
     memcpy(srandom, sh.random, 32);
+    memcpy(c->srandom, srandom, 32);
     if (!sh.tls13 && memcmp(srandom + 24, "DOWNGRD", 7) == 0) { TR("* TLS: downgrade sentinel in ServerHello random\n"); return TLS_E_PROTO; }
     c->version = sh.tls13 ? 0x0304 : 0x0303;
     TR("* TLS: ServerHello: TLS 1.%d, %s%s\n", sh.tls13 ? 3 : 2, s->name, sh.tls13 ? "" : (sh.ems ? ", EMS" : ", no EMS"));
@@ -730,6 +917,8 @@ struct tls_conn *tls_connect(int tcp_sock, const char *server_name, uint32_t tim
     struct tls_conn *c = (struct tls_conn *)kcalloc(1, sizeof(*c));
     if (!c) { *err = TLS_E_NOMEM; return NULL; }
     c->sock = tcp_sock;
+    c->verify = g_verify;
+    c->verify_result = 1;                                  /* "not checked" until the chain is validated */
     int r = handshake(c, server_name, timeout_ms ? timeout_ms : 8000);
     if (r) {
         TR("* TLS: handshake failed: %s\n", tls_error_text(r));
