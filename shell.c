@@ -141,9 +141,17 @@ static const struct command *find_command(const char *name)
 char *shell_read_file(const char *name, size_t *len_out)
 {
     int32_t size = vfs_file_size(name);
-    if (size < 0) return NULL;
 
-    if (size == 0) {
+    if (size <= 0) {
+        /* An empty regular file, or a character device: vfs_file_size() reports
+         * -1 for non-regular nodes, so stat and only stream the ones that
+         * really are devices (/dev/zero, /dev/urandom, /dev/null, ...). This is
+         * what lets filters such as hexdump read /dev/*. */
+        if (size < 0) {
+            vfs_node_t n;
+            if (vfs_stat(name, &n) != VFS_OK || n.type != VFS_NODE_CHR)
+                return NULL;
+        }
         char *buf = (char *)kmalloc(SHELL_STREAM_SAMPLE + 1);
         uint32_t got = 0;
         if (!buf) return NULL;
