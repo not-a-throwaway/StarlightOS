@@ -32,7 +32,7 @@ end-to-end checks (`make test`).
 | M6 | **CSS subset + bitmap images** (`<style>` cascade, colours, box model; PNG + BS64 + `data:`) | done |
 | M7 | **Browser chrome**: address bar, back/forward, bookmarks, HTTP cache, HTML forms | done |
 | M8 | **Performance: TCP window scaling** (RFC 7323) + a 128 KiB receive window | done |
-| M9 | TLS certificate validation (X.509 + RSA/ECDSA) and lifting TLS into the browser | in progress |
+| M9 | **HTTPS**: X.509 validation + a real TLS client in the kernel and in libslweb, with a built-in CA bundle | done |
 
 ### M1: user-mode window syscalls
 
@@ -96,9 +96,8 @@ It is built on newlib (malloc/stdio/string) and `user/slnet.h`; each request doe
 `sl_resolve`/`sl_socket`/`sl_connect` and waits for readability with `sl_poll`, so a blocked fetch
 still pumps the NIC (and any open app window) through the kernel's `poll`/`kyield` path.
 
-**HTTPS is not available yet.** Lifting the TLS client — and validating certificates — is still
-ahead (M9); an `https://` URL returns `SLWEB_ERR_HTTPS` (`-12`) so the browser can show an
-"unverified connection" badge instead of silently downgrading to cleartext.
+**HTTPS landed in M9.** The TLS client and certificate validation now live in libslweb too
+(`libslweb/tls_user.c` over the shared `tls.c`/`x509.c`); see the M9 section below.
 
 Build and use:
 
@@ -132,8 +131,8 @@ make apps/BROWSER.ELF
   URL with the new `slweb_url_resolve`.
 * **Navigate.** `b` goes back (a small URL stack), `r` reloads, and `up`/`down`/`pgup`/`pgdn`/`home`/
   `end` scroll (with a proportional scrollbar); `q`/`esc` or the titlebar close control quit.
-* **Unverified connections.** `https://` still returns `SLWEB_ERR_HTTPS`; the window shows an
-  `[unverified connection]` badge and the error page points at M9.
+* **Unverified connections.** In M4 an `https://` URL returned `SLWEB_ERR_HTTPS` and showed an
+  `[unverified connection]` badge; M9 makes https real — validated, or unverified under `-k`.
 
 There is deliberately no address bar yet — that is the M7 chrome milestone — so the URL comes from
 the command line and navigation is by following links. A bounded excerpt of the rendered text is
@@ -250,8 +249,6 @@ bar, go back/forward from the cache, add a bookmark, restart the browser and reo
 `BOOKMARKS.TXT`, and load a form page, edit a text field and checkbox, and submit it (GET) to a
 server endpoint (and it checks the saved bookmark on the disk image).
 
-server endpoint (and it checks the saved bookmark on the disk image).
-
 ### M8: TCP window scaling
 
 The kernel TCP stack (`tcp.c`) used to advertise a fixed 16 KiB window and ignore
@@ -282,6 +279,42 @@ negotiation directly — the SYN/SYN-ACK options, the >64 KiB advertised window 
 scaled peer window when the peer scales, the unscaled fallback when it does not,
 and the receive window shrinking as unread data arrives. The QEMU `net` group
 still fetches a 300 KB body byte-for-byte to exercise the larger window.
+
+### M9: HTTPS — TLS and certificate validation, kernel and browser
+
+`fetch https://...` and `BROWSER.ELF https://...` do a real TLS handshake and check
+the server certificate. The kernel and the browser run the **same** client: the
+sources live at the repository root and libslweb compiles them through a small
+platform shim, so there is only one implementation to test.
+
+* **Primitives** (`crypto.c chachapoly.c p256.c bignum.c rsa.c ecdsa.c`): SHA-256/384,
+  HMAC, HKDF, ChaCha20-Poly1305, AES-128/256-GCM, X25519, NIST P-256/P-384
+  (Montgomery bignum), RSA PKCS#1 v1.5 and PSS, and ECDSA (M9.1). All 32/64-bit
+  clean: no 64-bit division and no libc time.
+* **X.509** (`x509.c x509.h`): a freestanding, allocation-free DER parser and a
+  path validator — signature chain up to a trusted root, validity window, and
+  DNS subjectAltName/CN matching with single-label wildcards (M9.2).
+* **Kernel client** (`tls.c`): TLS 1.2 and 1.3, SNI, the ECDHE key exchange, and
+  CertificateVerify/ServerKeyExchange verification with the leaf key (M9.3).
+  `fetch -v` prints each handshake step and names a failure's TLS alert.
+* **Browser client** (`libslweb/tls_user.c` + the shared sources): the same code
+  behind the ring-3 socket syscalls, so `user/browser.c` fetches `https://` too.
+  It records `tls_verified`/`tls_peer`/`tls_error` and shows `[secure]` or
+  `[unverified connection]`.
+* **Trust store** (M9.5): the Mozilla root bundle (`assets/ca-certificates.crt`,
+  from `certifi`, MPL-2.0) is installed at `/etc/ssl/certs/ca-certificates.crt` in
+  `disk.img`. `fetch` and `BROWSER.ELF` load it by default, so https works out of
+  the box; `--cafile FILE` replaces it for one run and `-k`/`--insecure` skips
+  validation. Validation **fails closed**: with no roots loaded every chain is
+  rejected.
+
+Host tests: `make tlstest` runs the client against OpenSSL in 40+ configurations
+and `make slwebtlstest` drives libslweb's HTTPS path over real loopback sockets
+(verified fetch, unknown CA, hostname mismatch, `--insecure`). `make hosttest`
+covers the primitives, the X.509 parser and the HTML corpus. `python3
+tests/run_tests.py net browse` checks `fetch` and the browser against an
+`openssl s_server` fixture: unverified refusal, `-k`, `--cafile`, the built-in
+bundle, and the badge.
 
 ## Quick start
 
@@ -345,8 +378,9 @@ and an AC'97 sound card. Open the terminal from the dock (or press `6`); type `h
   - **Certificate validation:** the chain is checked against a trust store (signature chain up to a root, validity
     window, DNS subjectAltName/CN with single-label wildcards) and the CertificateVerify (1.3) / ServerKeyExchange (1.2)
     signature is verified with the leaf's key (`x509.c`, shared with libslweb). Accepts RSA (PKCS#1 v1.5 and PSS) and
-    ECDSA (P-256/P-384) certificates. Verification is **on by default and fails closed**: the trust store starts empty,
-    so every chain is rejected until you add roots with `fetch --cafile FILE` (a PEM bundle); `-k`/`--insecure` accepts
+    ECDSA (P-256/P-384) certificates. Verification is **on by default and fails closed**: the trust store is the built-in
+    root bundle from the disk (`/etc/ssl/certs/ca-certificates.crt`, M9.5), so a chain is accepted only if it reaches one
+    of those roots; `fetch --cafile FILE` replaces the bundle for one run and `-k`/`--insecure` accepts
     any certificate. Also unsupported: HelloRetryRequest, client certificates, session resumption, TLS 1.1 and older,
     static-RSA key exchange, Ed25519 certificates, and revocation (CRL/OCSP). Entropy for key generation is TSC jitter +
     clock + MAC (+ RDRAND when the CPU has it); fine for a hobby OS, not a certified CSPRNG. P-256 is not constant-time
@@ -449,6 +483,7 @@ fetch -L URL   fetch --no-redirect URL      # follow redirects (default 5 hops) 
 fetch -X PUT -d "x=1" URL                   # choose the method (-d alone implies POST)
 fetch -m 10 --max 65536 -q URL              # 10 s timeout, body size cap, quiet (no status line)
 fetch -k https://host/                      # skip certificate validation (accept any certificate)
+fetch https://host/                         # validated against the built-in bundle on the disk
 fetch --cafile roots.pem https://host/      # validate the server chain against the given PEM roots
 fetch URL | grep title | wc -l              # raw body flows through pipes
 ```
@@ -520,7 +555,8 @@ x86_64_port/  user/  apps/  make_disk.py  disk_files/  tests/
   Not yet tested in QEMU or on the cross toolchain: the new code was compiled with gcc `-m64`/`-m32` `-Wall -Wextra` and run on the host.
 
 * **TLS certificate validation is new and minimal** (TLS 1.3 and 1.2; x25519/P-256, RSA/ECDSA certificates, no revocation
-  checks). The trust store starts empty, so pass `--cafile FILE` (or `-k`) until the built-in CA bundle lands in M9.5.
+  checks). The built-in Mozilla root bundle (`/etc/ssl/certs/ca-certificates.crt`) is used by default; `--cafile FILE`
+  replaces it and `-k` skips validation.
 * IPv4 only; no IP fragmentation; one NIC model (RTL8139), one sound model (AC'97, 48 kHz out only — no recording).
 * TCP has no SACK and no out-of-order receive queue (a gap is answered with a duplicate ACK), so loss recovery is basic; RFC 7323 window scaling (M8) lifts the single-connection window to 128 KiB.
 * Cooperative multitasking only (no preemptive scheduler); a command that never yields freezes the UI.

@@ -514,6 +514,11 @@ def group_unix(work):
         check('/etc/hostname = starlight', r.strip() == 'starlight', r)
         r = vm.run('cat /etc/passwd')
         check('/etc/passwd: root and guest accounts', 'root:x:0:0:' in r and 'guest:x:1000:1000:' in r, r)
+        r = vm.run('ls /etc/ssl/certs')
+        check('/etc/ssl/certs holds the system CA bundle', 'ca-certificates.crt' in r, r)
+        r = vm.run('wc -c /etc/ssl/certs/ca-certificates.crt')
+        _nums = [int(t) for t in r.split() if t.isdigit()]
+        check('the built-in CA bundle is a substantial PEM file', _nums and _nums[0] > 100000, r)
         r = vm.run('cat /proc/version')
         check('/proc/version', 'StarlightOS' in r and 'x86_64' in r, r)
         r = vm.run('cat /proc/hostname')
@@ -870,6 +875,9 @@ def group_browse(work):
         check('https failure is a TLS error, not the old https-unavailable code',
               'BROWSER: error err=-7 (certificate did not verify)' in vm.log()[start2:],
               vm.log()[start2:][-500:])
+        _bundle = [l for l in vm.log()[start2:].splitlines() if 'default CA bundle' in l]
+        check('browser: the built-in CA bundle is loaded by default',
+              _bundle and int(_bundle[0].rsplit('roots=', 1)[1].split()[0]) > 50, repr(_bundle))
         vm.key('q')
         check('the unverified https run exits', vm.wait_for('BROWSER: done', 10, start2), vm.log()[start2:][-300:])
         r = vm.run('echo $?')
@@ -885,6 +893,8 @@ def group_browse(work):
         check('browser: https page fetched with a verified certificate',
               vm.wait_for('BROWSER: tls verified=1', 20, start2b)
               and vm.wait_for('BROWSER: fetch status=200', 20, start2b), vm.log()[start2b:][-600:])
+        check('browser: --cafile replaces the default bundle',
+              'default CA bundle' not in vm.log()[start2b:], vm.log()[start2b:][-300:])
         vm.key('q')
         check('the verified https run exits', vm.wait_for('BROWSER: done', 10, start2b), vm.log()[start2b:][-300:])
         r = vm.run('echo $?')

@@ -386,6 +386,15 @@ MODE_FS_REG = 0x8000
 MODE_FS_LNK = 0xA000
 FT_DIR, FT_FILE, FT_LNK = 2, 1, 7
 
+# The trusted-root bundle, installed at /etc/ssl/certs/ca-certificates.crt so
+# https:// works out of the box: the kernel TLS client (cmd_net.c fetch) and
+# libslweb's browser both load that path by default.  It is the Mozilla CA
+# bundle shipped by the `certifi` project (MPL-2.0); refresh it with:
+#   python3 -c "import certifi,shutil; shutil.copyfile(certifi.where(),'assets/ca-certificates.crt')"
+_ca_bundle_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'assets', 'ca-certificates.crt')
+CA_BUNDLE = open(_ca_bundle_path, 'rb').read() if os.path.isfile(_ca_bundle_path) else None
+
 tree = {
     '/': [
         ('bin', 'd'), ('dev', 'd'), ('etc', 'd'), ('home', 'd'), ('tmp', 'd'),
@@ -404,6 +413,11 @@ tree = {
     '/dev':     [],                             # filled by devfs at boot
 }
 
+if CA_BUNDLE is not None:
+    tree['/etc'].append(('ssl', 'd'))
+    tree['/etc/ssl'] = [('certs', 'd')]
+    tree['/etc/ssl/certs'] = [('ca-certificates.crt', 'f')]
+
 def dir_owner(kind, path, name):
     """Returns (uid, gid, mode) for a directory entry by its location."""
     R = (0, 0)
@@ -419,8 +433,8 @@ def dir_owner(kind, path, name):
     if kind == 'l':
         return (UID_GUEST, GID_GUEST, 0)
     # regular file
-    if path == '/etc':
-        return R + (E_MODE,)
+    if path == '/etc' or path.startswith('/etc/'):
+        return R + (E_MODE,)                    # /etc is root-owned, world-readable
     if path == '/home/guest' and name == '.profile':
         return (UID_GUEST, GID_GUEST, F_MODE)
     if name.upper().endswith('.ELF'):
@@ -437,6 +451,8 @@ def file_data(path, name):
                 return d
     if path == '/etc':
         return ETC_CONTENTS[name]
+    if path == '/etc/ssl/certs' and name == 'ca-certificates.crt':
+        return CA_BUNDLE
     if path == '/home/guest' and name == '.profile':
         return HOME_PROFILE
     if path == '/home/guest/httpd_test':
@@ -606,7 +622,7 @@ p32(gdt, 4, BLK_INODE_BITMAP)
 p32(gdt, 8, BLK_INODE_TABLE)
 p16(gdt, 12, 0)                   # bg_free_blocks_count (finalised below)
 p16(gdt, 14, 0)                   # bg_free_inodes_count (finalised below)
-p16(gdt, 16, len(tree))           # bg_used_dirs_count = root + 9 subdirs
+p16(gdt, 16, len(tree))           # bg_used_dirs_count = root + all subdirs
 vol[BLK_GDT * BLOCK_SIZE:BLK_GDT * BLOCK_SIZE + 32] = gdt
 
 # ---- free counts ----------------------------------------------------------

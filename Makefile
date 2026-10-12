@@ -110,7 +110,7 @@ stage2.bin: stage2.elf
 apps/MINES.ELF: user/minesweeper.c user/syscall.h apps/minesweeper.c apps/minesweeper.h user/user64.ld
 	$(CC64) -std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -m64 -nostdlib -no-pie -Wl,--build-id=none -Wl,-T,user/user64.ld -Iuser -o $@ user/minesweeper.c apps/minesweeper.c
 
-disk.img: make_disk.py assets/JetBrainsMonoNerdFont-Regular-ASCII.ttf starlightos64.bin bootsector.bin stage2.bin starlightos64.elf apps/MINES.ELF apps/GDEMO.ELF apps/NDEMO.ELF apps/WEBTEST.ELF apps/BROWSER.ELF $(wildcard apps/*.ELF) $(wildcard disk_files/*) user_files/guest/httpd_test/INDEX.HTM
+disk.img: make_disk.py assets/JetBrainsMonoNerdFont-Regular-ASCII.ttf assets/ca-certificates.crt starlightos64.bin bootsector.bin stage2.bin starlightos64.elf apps/MINES.ELF apps/GDEMO.ELF apps/NDEMO.ELF apps/WEBTEST.ELF apps/BROWSER.ELF $(wildcard apps/*.ELF) $(wildcard disk_files/*) user_files/guest/httpd_test/INDEX.HTM
 	python3 make_disk.py
 
 run64: starlightos64.elf starlightos64.bin bootsector.bin stage2.bin disk.img

@@ -334,7 +334,8 @@ static int cmd_fetch(int argc, char **argv)
                 "  -m SECS  timeout  --max BYTES  size cap   --no-redirect\n"
                 "  --cafile FILE  trust the PEM certificates in FILE (https)\n"
                 "  -k       do not verify the server certificate (https)\n"
-                "http:// and https:// (TLS 1.3; https certificates are validated against --cafile). Redirects are followed.\n");
+                "http:// and https:// (TLS 1.2/1.3). https uses the system roots in\n"
+                "/etc/ssl/certs/ca-certificates.crt unless --cafile or -k is given; redirects are followed.\n");
         return 1;
     }
     if (!need_net()) return 1;
@@ -342,15 +343,37 @@ static int cmd_fetch(int argc, char **argv)
     if (hdrs[0]) o.extra_headers = hdrs;
     if (outfile || out_auto) o.progress = on_progress;
 
+    static int default_ca_loaded;
+
     if (cafile) {
         static char cabuf[65536];
         uint32_t cn = 0;
         int vr = vfs_read_all(cafile, cabuf, sizeof(cabuf) - 1, &cn);
         if (vr != 0) { err("fetch: cannot read %s (%s)\n", cafile, vfs_strerror(vr)); return 1; }
         tls_ca_reset();
+        default_ca_loaded = 0;              /* --cafile replaces the trust store */
         int k = tls_ca_add_pem(cabuf, cn);
         if (k <= 0) { err("fetch: no usable CA certificates in %s\n", cafile); return 1; }
         if (o.verbose) kprintf("* loaded %d CA certificate(s) from %s\n", k, cafile);
+    } else if (!o.insecure && !strncasecmp(url, "https://", 8)) {
+        /* No --cafile: load the built-in root bundle once so https works out of
+         * the box (the same PEM the browser uses by default). */
+        if (!default_ca_loaded) {
+            int32_t sz = vfs_file_size("/etc/ssl/certs/ca-certificates.crt");
+            char *cabuf = sz > 0 ? (char *)kmalloc((size_t)sz + 1) : NULL;
+            if (cabuf) {
+                uint32_t cn = 0;
+                if (vfs_read_all("/etc/ssl/certs/ca-certificates.crt", cabuf, (uint32_t)sz, &cn) == 0) {
+                    tls_ca_reset();
+                    int k = tls_ca_add_pem(cabuf, cn);
+                    if (k > 0) {
+                        default_ca_loaded = 1;
+                        if (o.verbose) kprintf("* loaded %d CA certificate(s) from the system bundle\n", k);
+                    }
+                }
+                kfree(cabuf);
+            }
+        }
     }
 
     static char urlbuf[256];

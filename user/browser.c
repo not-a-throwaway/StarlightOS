@@ -24,7 +24,8 @@
  * full handshake and validates the server certificate against a trust store that
  * starts empty, so the browser takes --cafile FILE (load PEM roots) and
  * --insecure / -k (skip validation, for tests). A verified page shows "[secure]";
- * an opted-out or unverifiable one shows "[unverified connection]".
+ * an opted-out or unverifiable one shows "[unverified connection]". M9.5 ships a
+ * root bundle at /etc/ssl/certs/ca-certificates.crt and loads it by default.
  *
  * Keys:  Ctrl-L address bar   Ctrl-D bookmark   Ctrl-B bookmarks bar
  *        1-9 follow a link (or a bookmark when the bar is focused)
@@ -114,6 +115,9 @@ static int tls_verified;         /* https result: 1 = chain validated */
 static char tls_peer[128];       /* https peer CN ("" if none) */
 static int opt_insecure;         /* --insecure: do not validate certs */
 static char status_line[256];
+
+/* Trust roots loaded by default when the caller does not pass --cafile. */
+#define DEFAULT_CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
 
 static struct slweb_cache *cache;
 
@@ -1328,7 +1332,8 @@ static void usage(void)
         "<p>M9.4 adds real https://: the server certificate is validated against "
         "roots loaded with --cafile (the store starts empty and fails closed), "
         "and --insecure / -k skips validation. A validated page shows [secure]; "
-        "otherwise [unverified connection].</p>";
+        "otherwise [unverified connection]. M9.5 loads the built-in root bundle "
+        "/etc/ssl/certs/ca-certificates.crt by default.</p>";
     free_page();
     nboxes = nlinks = 0;
     doc_h = 0;
@@ -1344,6 +1349,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *start_url = NULL;
+    int cafile_given = 0;
 
     printf("BROWSER: start\n");
 
@@ -1353,14 +1359,19 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--cafile") && i + 1 < argc) {
             int roots = slweb_http_add_ca_file(argv[++i]);
             printf("BROWSER: cafile %s roots=%d\n", argv[i], roots);
+            cafile_given = 1;
         } else if (argv[i][0]) {
             start_url = argv[i];
         }
     }
-    /* M9.5 will ship a bundle here; a harmless no-op until then (the store
-     * still starts empty and https fails closed). */
-    if (!opt_insecure) slweb_http_add_ca_file("/etc/ssl/certs/ca-certificates.crt");
-    if (opt_insecure) printf("BROWSER: insecure certificate validation off\n");
+    /* With no explicit --cafile, load the built-in root bundle so https works
+     * out of the box; --insecure skips validation entirely. */
+    if (opt_insecure) {
+        printf("BROWSER: insecure certificate validation off\n");
+    } else if (!cafile_given) {
+        int roots = slweb_http_add_ca_file(DEFAULT_CA_BUNDLE);
+        if (roots > 0) printf("BROWSER: default CA bundle %s roots=%d\n", DEFAULT_CA_BUNDLE, roots);
+    }
 
     fb = (uint32_t *)sl_fbmap(W, H);
     if (!fb) { printf("BROWSER: fbmap FAIL errno=%d\n", errno); return 1; }
